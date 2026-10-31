@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Production builds
+dist/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Operating system
+.DS_Store
+
+# Debug logs
+*.log
+
+# Editor settings
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Private local files
+*.local
+.vercel
