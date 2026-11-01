@@ -23,3 +23,6 @@ dist/
 # Private local files
 *.local
 .vercel
+
+# Generated review files (copy approved, sanitized fixtures into test-fixtures/)
+outputs/

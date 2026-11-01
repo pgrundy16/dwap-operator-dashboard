@@ -2,6 +2,8 @@
 
 React/Vite dashboard for reviewing booking requests and recording job updates. The browser calls same-origin server endpoints in `api/`. Those endpoints check a signed, HTTP-only session cookie and call the Google Apps Script backend. Customer records and server credentials are never embedded in the browser build.
 
+The shared system design is documented in `docs/architecture.md`, `docs/data-contract.md`, and `docs/job-lifecycle.md`. Sanitized workbook and booking-intake fixtures with isolated setup instructions are in `test-fixtures/`. The fixtures are not deployed to Google or connected to live business data.
+
 ## What currently works
 
 - List jobs from the booking and operator sheets through Apps Script.
