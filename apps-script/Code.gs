@@ -688,8 +688,8 @@ function getJobsCalendar_() {
 }
 
 function calendarPeriod_(job) {
-  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(String(job.preferredDate || "")) ||
-      !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(job.preferredTime || ""))) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(job.preferredDate || "")) ||
+      !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(job.preferredTime || ""))) {
     throw new Error("Calendar requires a valid proposed date and time.");
   }
   var start = Utilities.parseDate(
@@ -1022,8 +1022,8 @@ function validateDashboardPayload_(action, payload) {
 
   if (action === CONFIG.actions.updateBooking) {
     var date = payload.preferredDate;
-    if (date !== undefined && (typeof date !== "string" || !/^\\d{4}-\\d{2}-\\d{2}$/.test(date) || isNaN(new Date(date + "T12:00:00Z").getTime()) || new Date(date + "T12:00:00Z").toISOString().slice(0,10) !== date)) throw new Error("Invalid proposed date.");
-    if (payload.preferredTime !== undefined && (typeof payload.preferredTime !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(payload.preferredTime))) throw new Error("Invalid proposed time.");
+    if (date !== undefined && (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(new Date(date + "T12:00:00Z").getTime()) || new Date(date + "T12:00:00Z").toISOString().slice(0,10) !== date)) throw new Error("Invalid proposed date.");
+    if (payload.preferredTime !== undefined && (typeof payload.preferredTime !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(payload.preferredTime))) throw new Error("Invalid proposed time.");
     if (payload.operatorNotes !== undefined && (typeof payload.operatorNotes !== "string" || payload.operatorNotes.length > 5000)) throw new Error("Invalid notes.");
     if (payload.balanceCollected !== undefined && typeof payload.balanceCollected !== "boolean") throw new Error("Invalid balance state.");
     ["quoteTotal", "depositAmount", "actualDurationHours"].forEach(function(field) {
