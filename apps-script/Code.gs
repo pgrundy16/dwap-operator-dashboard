@@ -66,7 +66,7 @@ var HEADER_ALIASES = {
   elevatorAtDropoff: ["elevatorAtDropoff", "elevator_at_dropoff", "Elevator At Dropoff", "Dropoff Elevator"],
   submittedAt: ["submittedAt", "submitted_at", "Submitted At", "Timestamp", "Created At"],
   additionalNotes: ["additionalNotes", "additional_notes", "Additional Notes", "Notes"],
-  serviceDetails: ["serviceDetails", "service_details", "Service Details"],
+  serviceDetails: ["serviceDetails", "service_details", "Service Details", "Service-Specific Fields (JSON)"],
   quoteTotal: ["quoteTotal", "quote_total", "Quote Total", "Quote"],
   depositAmount: ["depositAmount", "deposit_amount", "Deposit Amount", "Deposit"],
   balanceDue: ["balanceDue", "balance_due", "Balance Due", "Balance"],
@@ -326,10 +326,6 @@ function normalizeJobRecord_(record) {
     normalized[field] = normalizeField_(field, record ? record[field] : "");
   });
 
-  if (!normalized.requestId) {
-    normalized.requestId = normalized.jobId;
-  }
-
   if (!normalized.jobId) {
     normalized.jobId = buildJobId_(normalized);
   }
@@ -397,7 +393,7 @@ function normalizeField_(field, value) {
     field === "balanceDue" ||
     field === "actualDurationHours"
   ) {
-    return parseNumber_(value);
+    return field === "estimatedTimeHours" ? parseDurationHours_(value) : parseNumber_(value);
   }
 
   if (field === "status") {
@@ -473,6 +469,12 @@ function normalizeDateField_(value) {
     return formatDate_(value, "yyyy-MM-dd");
   }
 
+  var dateOnly = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) {
+    var exactDate = new Date(dateOnly + "T12:00:00Z");
+    return !isNaN(exactDate.getTime()) && exactDate.toISOString().slice(0, 10) === dateOnly ? dateOnly : "";
+  }
+
   var parsed = parseDate_(value);
   if (!parsed) {
     return String(value);
@@ -491,8 +493,12 @@ function normalizeTimeField_(value) {
   }
 
   var trimmed = String(value).trim();
-  if (/^\d{1,2}:\d{2}$/.test(trimmed)) {
-    return trimmed.length === 4 ? "0" + trimmed : trimmed;
+  var clockMatch = trimmed.match(/^(\d{1,2}):(\d{2})$/);
+  if (clockMatch) {
+    var hour = Number(clockMatch[1]);
+    var minute = Number(clockMatch[2]);
+    if (hour > 23 || minute > 59) return "";
+    return (hour < 10 ? "0" : "") + hour + ":" + clockMatch[2];
   }
 
   var parsed = parseDate_(value);
@@ -523,6 +529,13 @@ function parseNumber_(value) {
 
   var number = Number(value);
   return isNaN(number) ? null : number;
+}
+
+function parseDurationHours_(value) {
+  if (value === "" || value === null || value === undefined) return null;
+  if (typeof value === "number") return isFinite(value) ? value : null;
+  var match = String(value).trim().match(/^([0-9]+(?:\.[0-9]+)?)\s*(?:h|hr|hrs|hour|hours)?$/i);
+  return match ? Number(match[1]) : null;
 }
 
 function normalizeStatus_(value) {
@@ -883,10 +896,5 @@ function formatDate_(date, pattern) {
 }
 
 function getTimezone_() {
-  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  return (
-    (spreadsheet && spreadsheet.getSpreadsheetTimeZone && spreadsheet.getSpreadsheetTimeZone()) ||
-    Session.getScriptTimeZone() ||
-    "America/Toronto"
-  );
+  return "America/Toronto";
 }

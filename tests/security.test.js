@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import sessionHandler from "../api/session.js";
 import jobsHandler from "../api/jobs.js";
+import { fetchJobs } from "../src/lib/api.js";
+import { formatDate, formatDateTime, formatJobTime } from "../src/lib/formatters.js";
 
 const oldEnv = {
   DASHBOARD_PASSPHRASE: process.env.DASHBOARD_PASSPHRASE,
@@ -211,4 +213,37 @@ test("job response data is available only to an authenticated session", async ()
   assert.equal(allowed.code, 200);
   assert.equal(allowed.body.jobs[0].customerName, "Sample Customer");
   assert.equal(fetchCalls, 1);
+});
+
+test("gateway treats malformed upstream jobs as an upstream failure", async () => {
+  const login = response();
+  sessionHandler({ method: "POST", headers: sameOriginHeaders, body: { passphrase: process.env.DASHBOARD_PASSPHRASE } }, login);
+  const cookie = login.headers["set-cookie"].split(";")[0];
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, jobs: "not-an-array" }) });
+  const res = response();
+  await jobsHandler({ method: "GET", headers: { cookie } }, res);
+  assert.equal(res.code, 502);
+  assert.equal(res.body.ok, false);
+});
+
+test("browser job client keeps valid jobs and counts malformed or duplicate records", async () => {
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({ ok: true, jobs: [
+      { jobId: "JOB-1", requestId: "req-1", status: "new", preferredDate: "2026-11-12", preferredTime: "09:00", serviceDetails: { item: "box" } },
+      { jobId: "JOB-2", requestId: "req-1", status: "NEW" },
+      { jobId: "JOB-3", requestId: "req-3", preferredDate: "not-a-date" },
+      null,
+    ] }),
+  });
+  const result = await fetchJobs();
+  assert.equal(result.jobs.length, 1);
+  assert.equal(result.rejectedCount, 3);
+  assert.equal(result.jobs[0].status, "NEW");
+});
+
+test("job dates and timestamps display in America/Toronto", () => {
+  assert.match(formatDate("2026-11-12"), /Thu, Nov 12/);
+  assert.match(formatJobTime("2026-11-12", "09:00"), /9:00/);
+  assert.match(formatDateTime("2026-11-12T14:00:00Z"), /9:00/);
 });

@@ -14,7 +14,7 @@ This contract records the **test environment** and mappings visible in source, w
 | `leadCalendarEventId` | Intake event pointer | Stored in `Sheet1` column Z. The current physical header is `Booking Calendar Event ID`, but the deployed test booking script creates the intake event on the lead calendar. |
 | `bookingCalendarEventId` | Confirmed job event pointer | Stored in `Jobs.calendarEventId` after the dashboard transfers the event to the booking calendar. The current dashboard source creates a new event but does not move or remove the lead event. |
 
-**Current-code caveat:** the dashboard falls back from a missing Request ID to Job ID, and can generate `jobId` from date plus a six-character Request ID prefix. The Time Ticket code can fall back to a booking row number when Request ID is absent. Those fallbacks are compatibility behavior, **not** the target contract. Reject or quarantine missing/duplicate Request IDs before production integration.
+**Current-code caveat:** the dashboard can generate a display `jobId` from date plus a six-character Request ID prefix, but no longer fabricates a missing Request ID from Job ID. The browser skips rows missing either stable identifier and reports malformed rows. The Time Ticket code can fall back to a booking row number when Request ID is absent. Those legacy fallbacks are **not** the target contract. Reject or quarantine missing/duplicate Request IDs before production integration.
 
 ## Booking intake (`Sheet1`)
 
@@ -62,7 +62,7 @@ The dashboard Apps Script creates `Jobs` if absent and writes the canonical head
 | Quote/payment metadata | `quoteTotal`, `depositAmount`, `balanceDue`, `depositLink`, `depositSentAt`, `depositPaid` | Operator-entered amounts/link and a claimed flag; Square remains payment authority |
 | Completion/operations | `confirmedAt`, `completedAt`, `actualDurationHours`, `operatorNotes`, `archiveOn`, `riskFlags` | Operator actions and display metadata |
 
-`quoteTotal`, `depositAmount`, `balanceDue`, and duration fields are numeric in the dashboard contract. Blank numeric cells normalize to `null`. The booking script writes `Estimated Time` as a display string such as `2h`, which the dashboard's number parser does not accept; move and junk payloads currently omit `estimatedDurationMinutes` entirely. `serviceDetails` and `riskFlags` are serialized JSON in the operator sheet. The current script interprets Boolean-like values such as `true`, `yes`, and `1` as true. The `Jobs` sheet should have at most one row per Request ID; duplicate handling needs explicit validation in the test flow.
+`quoteTotal`, `depositAmount`, `balanceDue`, and duration fields are numeric in the dashboard contract. Blank numeric cells normalize to `null`. The dashboard Apps Script now accepts display durations such as `2h` and maps `Service-Specific Fields (JSON)` to `serviceDetails`. Move/junk payloads can omit estimated duration, so those records remain blank instead of guessing a duration. `serviceDetails` and `riskFlags` are serialized JSON in the operator sheet. The current script interprets Boolean-like values such as `true`, `yes`, and `1` as true. The browser rejects records with missing identifiers, malformed date/time or invalid numeric fields, and skips duplicate Request IDs while showing an operator warning. The `Jobs` sheet should have at most one row per Request ID.
 
 ## Labour allocation workbook
 
@@ -82,12 +82,12 @@ The Time Ticket script rounds **each job** up to the next 15-minute payroll inte
 
 | Field | Contract | Current-code behavior / check |
 | --- | --- | --- |
-| `preferredDate`, Time Ticket `date`, pay-period work date | Calendar date `YYYY-MM-DD` in `America/Toronto` | BookingForm builds a date string; the export mostly stores actual spreadsheet date cells in B. Both test calendars and the active booking Apps Script project are Toronto time. Both linked Excel-format test workbooks report Pacific Time and United States locale; they are not native Google Sheets yet. Convert and align the test workbooks before date/payroll formula checks. The Time Ticket Apps Script time zone remains unchecked. Dashboard Apps Script formats Sheet dates in spreadsheet time zone, then script time zone, then Toronto; Time Ticket defaults to Toronto. |
+| `preferredDate`, Time Ticket `date`, pay-period work date | Calendar date `YYYY-MM-DD` in `America/Toronto` | BookingForm builds a date string; the export mostly stores actual spreadsheet date cells in B. Dashboard Apps Script, browser date/time formatting, and “confirmed today” now use `America/Toronto`. Both test calendars and the active booking Apps Script project are Toronto time. Both linked Excel-format test workbooks report Pacific Time and United States locale; they are not native Google Sheets yet. Convert and align the test workbooks before date/payroll formula checks. The Time Ticket Apps Script time zone remains unchecked. |
 | `preferredTime`, start/end | Local 24-hour `HH:mm` | BookingForm sends a time string; the export mostly stores spreadsheet time cells in C. Dashboard normalizes date-like values to `HH:mm`; Time Ticket expects `H:mm` or `HH:mm` and does not support an overnight span in one entry. |
 | `submittedAt`, `depositSentAt`, `confirmedAt`, `completedAt`, `archiveOn` | ISO 8601 timestamp with offset/UTC (`Z` preferred) | Dashboard writes ISO UTC timestamps. The browser should format using the business time zone rather than relying on device time zone. |
 | Quote, deposit, balance | CAD currency amounts, nonnegative decimal | Current dashboard stores JS numbers and derives balance when blank. Square is the financial source of truth. |
 
-**Known time-zone gap:** the dashboard browser calculates “confirmed today” using UTC date, while Apps Script uses Sheet/script time zone. Near midnight these may differ from Toronto business date. The copied environment should test this before live use.
+**Remaining time-zone check:** the live test Sheets' timezone and the Time Ticket Apps Script timezone have not been independently confirmed. The dashboard explicitly normalizes dates and displays timestamps in `America/Toronto`.
 
 ## Test-copy acceptance checks
 

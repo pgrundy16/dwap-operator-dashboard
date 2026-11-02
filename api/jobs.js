@@ -174,7 +174,10 @@ export default async function handler(req, res) {
       return res.status(502).json({ ok: false, error: "The job service rejected the request." });
     }
     if (req.method === "GET") {
-      return res.status(200).json({ ok: true, jobs: Array.isArray(data.jobs) ? data.jobs : [] });
+      if (!Array.isArray(data.jobs)) {
+        return res.status(502).json({ ok: false, error: "The job service returned an invalid jobs list." });
+      }
+      return res.status(200).json({ ok: true, jobs: data.jobs });
     }
     if (!isPlainObject(data.job)) {
       return res.status(502).json({ ok: false, error: "The job service returned an invalid response." });

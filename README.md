@@ -47,3 +47,5 @@ If an earlier token or passphrase was exposed, replace the Apps Script token pro
 ## Verification
 
 Run `npm install`, `npm test`, and `npm run build`. Use the full-stack deployment or `vercel dev` to check sign-in, sign-out, an unauthorized `/api/jobs` request, session expiration, job listing, invalid input rejection, and one synthetic test update. Use synthetic booking records for portfolio screenshots.
+
+Append `?demo=1` to the dashboard URL for a public portfolio view containing only synthetic records. Demo mode bypasses sign-in, does not call the jobs API, and disables write controls. The default route remains live mode and uses only authenticated backend data.

@@ -65,3 +65,16 @@ test("Apps Script rejects oversized bodies before parsing them", () => {
   assert.equal(result.ok, false);
   assert.equal(result.error, "Request body is too large.");
 });
+
+test("booking normalization accepts the website service JSON field and display durations", () => {
+  const script = loadScript();
+  const detailsIndex = script.HEADER_ALIASES.serviceDetails.indexOf("Service-Specific Fields (JSON)");
+  assert.notEqual(detailsIndex, -1);
+  assert.equal(script.parseDurationHours_("2h"), 2);
+  assert.equal(script.parseDurationHours_("2.5 hours"), 2.5);
+  assert.equal(script.parseDurationHours_("unknown"), null);
+  assert.equal(script.normalizeDateField_("2026-11-12"), "2026-11-12");
+  assert.equal(script.normalizeTimeField_("9:05"), "09:05");
+  assert.equal(script.normalizeTimeField_("25:05"), "");
+  assert.equal(script.normalizeJobRecord_({ jobId: "legacy-job" }).requestId, "");
+});

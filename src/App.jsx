@@ -13,6 +13,9 @@ import { StatCard } from "./components/StatCard";
 import { JobCard } from "./components/JobCard";
 import { JobDetail } from "./components/JobDetail";
 import { formatCurrency } from "./lib/formatters";
+import { demoJobs } from "./lib/demoJobs";
+
+const isDemoMode = new URLSearchParams(window.location.search).get("demo") === "1";
 
 function buildQuoteDraft(job) {
   return {
@@ -24,9 +27,9 @@ function buildQuoteDraft(job) {
 }
 
 export default function App() {
-  const [isUnlocked, setIsUnlocked] = useState(false);
+  const [isUnlocked, setIsUnlocked] = useState(isDemoMode);
   const [sessionExpiresAt, setSessionExpiresAt] = useState(null);
-  const [isCheckingSession, setIsCheckingSession] = useState(true);
+  const [isCheckingSession, setIsCheckingSession] = useState(!isDemoMode);
   const [loginError, setLoginError] = useState("");
   const [jobs, setJobs] = useState([]);
   const [selectedJobId, setSelectedJobId] = useState("");
@@ -35,6 +38,8 @@ export default function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [dataError, setDataError] = useState("");
   const [actionError, setActionError] = useState("");
+  const [malformedCount, setMalformedCount] = useState(0);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const lockDashboard = useCallback((message = "") => {
     setIsUnlocked(false);
@@ -48,6 +53,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (isDemoMode) return undefined;
     let active = true;
     getSession()
       .then((session) => {
@@ -96,11 +102,12 @@ export default function App() {
       setIsLoading(true);
       setDataError("");
       try {
-        const data = await fetchJobs();
+        const result = isDemoMode ? { jobs: demoJobs, rejectedCount: 0 } : await fetchJobs();
         if (!isMounted) return;
-        setJobs(data);
+        setJobs(result.jobs);
+        setMalformedCount(result.rejectedCount);
         setSelectedJobId((current) =>
-          data.some((job) => job.jobId === current) ? current : data[0]?.jobId || "",
+          result.jobs.some((job) => job.jobId === current) ? current : result.jobs[0]?.jobId || "",
         );
       } catch (error) {
         if (!isMounted) return;
@@ -118,7 +125,7 @@ export default function App() {
     return () => {
       isMounted = false;
     };
-  }, [isUnlocked, lockDashboard]);
+  }, [isUnlocked, lockDashboard, reloadKey]);
 
   const selectedJob = useMemo(
     () => jobs.find((job) => job.jobId === selectedJobId) || jobs[0],
@@ -134,7 +141,7 @@ export default function App() {
     const confirmedToday = jobs.filter(
       (job) =>
         job.status === "CONFIRMED" &&
-        job.preferredDate === new Date().toISOString().slice(0, 10),
+        job.preferredDate === new Intl.DateTimeFormat("en-CA", { timeZone: "America/Toronto", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()),
     ).length;
     const balanceOpen = jobs.reduce(
       (total, job) => total + (job.status === "CONFIRMED" ? Number(job.balanceDue || 0) : 0),
@@ -187,6 +194,7 @@ export default function App() {
   }
 
   async function handleSendDeposit() {
+    if (isDemoMode) return;
     const quoteTotal = Number(quoteDraft.quoteTotal || 0);
     const depositAmount = Number(quoteDraft.depositAmount || 0);
     const balanceDue =
@@ -217,6 +225,7 @@ export default function App() {
   }
 
   async function handleConfirm() {
+    if (isDemoMode) return;
     setIsSaving(true);
     setActionError("");
     try {
@@ -238,6 +247,7 @@ export default function App() {
   }
 
   async function handleComplete() {
+    if (isDemoMode) return;
     setIsSaving(true);
     setActionError("");
     try {
@@ -283,7 +293,7 @@ export default function App() {
                 ? "Saving live job updates..."
                 : dataError
                   ? "Unable to load jobs"
-                  : "Jobs loaded"}
+                  : isDemoMode ? "Demo data" : "Jobs loaded"}
           </strong>
         </div>
       </section>
@@ -299,7 +309,7 @@ export default function App() {
                 ? "Saving live job updates..."
                 : dataError
                   ? "Unable to load jobs"
-                  : "Jobs loaded"}
+                  : isDemoMode ? "Demo data" : "Jobs loaded"}
           </strong>
         </div>
 
@@ -321,8 +331,11 @@ export default function App() {
       </section>
 
       <div className="dashboard-notices">
-        <button type="button" onClick={handleLogout}>Sign out</button>
+        {isDemoMode ? <p role="status">Demonstration mode: synthetic records only. Remove ?demo=1 for live data.</p> : null}
+        <button type="button" onClick={() => setReloadKey((key) => key + 1)} disabled={isLoading}>Refresh jobs</button>
+        {!isDemoMode ? <button type="button" onClick={handleLogout}>Sign out</button> : null}
         {dataError ? <p role="alert">Could not load jobs: {dataError}</p> : null}
+        {malformedCount ? <p role="alert">Skipped {malformedCount} malformed booking record{malformedCount === 1 ? "" : "s"}; check the source sheet mapping.</p> : null}
         {actionError ? <p role="alert">Could not save job: {actionError}</p> : null}
       </div>
 
@@ -364,20 +377,23 @@ export default function App() {
           </div>
 
           <div className="job-list">
+            {isLoading ? <p role="status">Loading jobs…</p> : null}
+            {!isLoading && dataError ? <div role="alert"><p>Jobs could not be loaded.</p><button type="button" onClick={() => setReloadKey((key) => key + 1)}>Retry</button></div> : null}
             {!isLoading && !dataError && jobs.length === 0 ? (
-              <p>No jobs found.</p>
-            ) : jobs.map((job) => (
+              <p role="status">No jobs found. New booking requests will appear here when received.</p>
+            ) : null}
+            {!isLoading && !dataError ? jobs.map((job) => (
               <JobCard
                 key={job.jobId}
                 job={job}
                 isActive={job.jobId === selectedJob?.jobId}
                 onSelect={setSelectedJobId}
               />
-            ))}
+            )) : null}
           </div>
         </aside>
 
-        {selectedJob ? (
+        {selectedJob && !isLoading && !dataError ? (
           <JobDetail
             job={selectedJob}
             quoteDraft={quoteDraft}
@@ -386,6 +402,7 @@ export default function App() {
             onConfirm={handleConfirm}
             onComplete={handleComplete}
             isSaving={isSaving}
+            isDemoMode={isDemoMode}
           />
         ) : null}
       </section>

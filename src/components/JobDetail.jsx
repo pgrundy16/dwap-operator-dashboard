@@ -18,6 +18,7 @@ export function JobDetail({
   onConfirm,
   onComplete,
   isSaving,
+  isDemoMode = false,
 }) {
   const accessSummary = [
     job.elevatorAtPickup ? "Elevator at pickup" : "No pickup elevator",
@@ -152,6 +153,7 @@ export function JobDetail({
                   inputMode="decimal"
                   value={quoteDraft.quoteTotal}
                   onChange={(event) => onQuoteChange("quoteTotal", event.target.value)}
+                  disabled={isDemoMode}
                   placeholder="650"
                 />
               </label>
@@ -162,6 +164,7 @@ export function JobDetail({
                   inputMode="decimal"
                   value={quoteDraft.depositAmount}
                   onChange={(event) => onQuoteChange("depositAmount", event.target.value)}
+                  disabled={isDemoMode}
                   placeholder="200"
                 />
               </label>
@@ -172,6 +175,7 @@ export function JobDetail({
                   inputMode="decimal"
                   value={quoteDraft.balanceDue}
                   onChange={(event) => onQuoteChange("balanceDue", event.target.value)}
+                  disabled={isDemoMode}
                   placeholder="450"
                 />
               </label>
@@ -181,19 +185,20 @@ export function JobDetail({
                   type="url"
                   value={quoteDraft.depositLink}
                   onChange={(event) => onQuoteChange("depositLink", event.target.value)}
+                  disabled={isDemoMode}
                   placeholder="https://square.link/..."
                 />
               </label>
             </div>
 
             <div className="quote-actions">
-              <button className="button button--primary" type="button" onClick={onSendDeposit} disabled={isSaving}>
+              <button className="button button--primary" type="button" onClick={onSendDeposit} disabled={isSaving || isDemoMode}>
                 Record Quote and Deposit
               </button>
-              <button className="button button--secondary" type="button" onClick={onConfirm} disabled={isSaving}>
+              <button className="button button--secondary" type="button" onClick={onConfirm} disabled={isSaving || isDemoMode}>
                 Mark Confirmed
               </button>
-              <button className="button button--ghost" type="button" onClick={onComplete} disabled={isSaving}>
+              <button className="button button--ghost" type="button" onClick={onComplete} disabled={isSaving || isDemoMode}>
                 Mark Done
               </button>
             </div>
