@@ -15,6 +15,7 @@ export function JobDetail({
   quoteDraft,
   onQuoteChange,
   onSendDeposit,
+  onSave,
   onConfirm,
   onComplete,
   isSaving,
@@ -77,8 +78,8 @@ export function JobDetail({
               <h3>Customer</h3>
             </div>
             <div className="detail-meta-grid">
-              <Field label="Phone" value={job.phone} className="detail-field--card" />
-              <Field label="Email" value={job.email} className="detail-field--card" />
+              <div className="detail-field detail-field--card"><span>Phone</span><strong>{/^\\+?[\\d ()-]{7,24}$/.test(job.phone || "") ? <a href={`tel:${job.phone.replace(/[^+\\d]/g, "")}`}>{job.phone}</a> : job.phone || "Not set"}</strong></div>
+              <div className="detail-field detail-field--card"><span>Email</span><strong>{/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(job.email || "") ? <a href={`mailto:${job.email}`}>{job.email}</a> : job.email || "Not set"}</strong></div>
               <Field
                 label="Submitted"
                 value={formatDateTime(job.submittedAt)}
@@ -114,11 +115,9 @@ export function JobDetail({
                 value={job.additionalNotes}
                 className="detail-field--card detail-field--note"
               />
-              <Field
-                label="Operator Notes"
-                value={job.operatorNotes}
-                className="detail-field--card detail-field--note"
-              />
+              <label className="quote-grid__wide">Operator Notes
+                <textarea value={quoteDraft.operatorNotes} onChange={(event) => onQuoteChange("operatorNotes", event.target.value)} maxLength={5000} rows={4} disabled={isSaving || isDemoMode} />
+              </label>
             </div>
             <div className="service-detail-grid">
               <Field label="Pickup" value={job.pickupAddress} className="detail-field--card" />
@@ -146,6 +145,19 @@ export function JobDetail({
               <p>Record details prepared outside the dashboard.</p>
             </div>
             <div className="quote-grid">
+              <label>Proposed booking date
+                <input type="date" value={quoteDraft.preferredDate} onChange={(e) => onQuoteChange("preferredDate", e.target.value)} disabled={isSaving || isDemoMode} />
+              </label>
+              <label>Proposed booking time
+                <input type="time" value={quoteDraft.preferredTime} onChange={(e) => onQuoteChange("preferredTime", e.target.value)} disabled={isSaving || isDemoMode} />
+              </label>
+              <label>Actual duration (hours)
+                <input type="number" min="0" max="1000" step="0.25" value={quoteDraft.actualDurationHours} onChange={(e) => onQuoteChange("actualDurationHours", e.target.value)} disabled={isSaving || isDemoMode} />
+              </label>
+              <label className="quote-grid__wide">
+                <input type="checkbox" checked={quoteDraft.balanceCollected} onChange={(e) => onQuoteChange("balanceCollected", e.target.checked)} disabled={isSaving || isDemoMode || job.status !== "DONE"} />
+                Balance collected (operator-verified; not Square verified)
+              </label>
               <label>
                 Quote Total
                 <input
@@ -192,13 +204,14 @@ export function JobDetail({
             </div>
 
             <div className="quote-actions">
-              <button className="button button--primary" type="button" onClick={onSendDeposit} disabled={isSaving || isDemoMode}>
+              <button className="button button--primary" type="button" onClick={onSave} disabled={isSaving || isDemoMode}>Save booking edits</button>
+              <button className="button button--secondary" type="button" onClick={onSendDeposit} disabled={isSaving || isDemoMode || job.status !== "NEW"}>
                 Record Quote and Deposit
               </button>
-              <button className="button button--secondary" type="button" onClick={onConfirm} disabled={isSaving || isDemoMode}>
+              <button className="button button--secondary" type="button" onClick={onConfirm} disabled={isSaving || isDemoMode || job.status !== "DEPOSIT_SENT"}>
                 Mark Confirmed
               </button>
-              <button className="button button--ghost" type="button" onClick={onComplete} disabled={isSaving || isDemoMode}>
+              <button className="button button--ghost" type="button" onClick={onComplete} disabled={isSaving || isDemoMode || job.status !== "CONFIRMED"}>
                 Mark Done
               </button>
             </div>
