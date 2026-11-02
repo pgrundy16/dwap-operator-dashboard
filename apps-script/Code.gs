@@ -230,10 +230,11 @@ function updateBooking_(payload) {
     if (patch.balanceCollected === true && normalizeStatus_(job.status) !== "DONE") {
       throw new Error("Balance may only be marked collected when the job is complete.");
     }
-    if (normalizeStatus_(job.status) === "DONE" && (patch.preferredDate !== undefined || patch.preferredTime !== undefined)) throw new Error("Cannot reschedule a completed job.");
+    var scheduleChanged = (patch.preferredDate !== undefined && patch.preferredDate !== job.preferredDate) || (patch.preferredTime !== undefined && patch.preferredTime !== job.preferredTime);
+    if (normalizeStatus_(job.status) === "DONE" && scheduleChanged) throw new Error("Cannot reschedule a completed job.");
     var updated = mergeObjects_(job, patch);
-    if (job.status === "CONFIRMED" && job.calendarEventId &&
-        (patch.preferredDate !== undefined || patch.preferredTime !== undefined)) {
+    if (job.status === "CONFIRMED" && scheduleChanged) {
+      if (!job.calendarEventId) throw new Error("No calendar event for rescheduling.");
       var calendar = CalendarApp.getCalendarById(getConfig_().jobsCalendarId);
       var event = calendar && calendar.getEventById(job.calendarEventId);
       if (!event) throw new Error("Scheduled event not found. No changes saved.");
