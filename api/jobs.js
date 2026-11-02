@@ -78,7 +78,7 @@ function validateActionPayload(body) {
       if (!Object.hasOwn(body, field)) continue;
       const value = body[field];
       if (field === "preferredDate") {
-        if (typeof value !== "string" || !/^\\d{4}-\\d{2}-\\d{2}$/.test(value) || new Date(value + "T12:00:00Z").toISOString().slice(0, 10) !== value) return { error: "Invalid proposed date." };
+        if (typeof value !== "string" || !/^\\d{4}-\\d{2}-\\d{2}$/.test(value) || (Number.isNaN(new Date(value + "T12:00:00Z").getTime()) || new Date(value + "T12:00:00Z").toISOString().slice(0, 10) !== value)) return { error: "Invalid proposed date." };
       } else if (field === "preferredTime") {
         if (typeof value !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(value)) return { error: "Invalid proposed time." };
       } else if (field === "operatorNotes") {
