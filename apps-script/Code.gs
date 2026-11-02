@@ -721,7 +721,7 @@ function findJobsEvent_(calendar, job) {
   var end = new Date(period.end.getTime() + 14 * 86400000);
   var marker = "DWAP-Request-ID: " + job.requestId;
   var matches = calendar.getEvents(start, end).filter(function(event) {
-    return String(event.getDescription() || "").split("\\n").indexOf(marker) !== -1;
+    return String(event.getDescription() || "").split("\n").indexOf(marker) !== -1;
   });
   if (matches.length > 1) throw new Error("Calendar has duplicate events for this Request ID. Manual reconciliation required.");
   return matches[0] || null;
@@ -769,7 +769,7 @@ function createCalendarEvent_(job, calendar, period) {
     "Quote: " + (job.quoteTotal || ""),
     "Balance Due: " + (job.balanceDue || ""),
     "Notes: " + (job.additionalNotes || ""),
-  ].join("\\n");
+  ].join("\n");
   return calendar.createEvent(title, period.start, period.end, {
     description: description,
     location: job.pickupAddress || job.dropoffAddress || "",
