@@ -12,6 +12,25 @@ var CONFIG = {
   },
 };
 
+// Runtime configuration for a standalone Apps Script project. Values belong in
+// Project Settings > Script Properties, never in source code.
+function getConfig_() {
+  var properties = PropertiesService.getScriptProperties();
+  var config = {
+    spreadsheetId: properties.getProperty("DASHBOARD_SPREADSHEET_ID"),
+    jobsCalendarId: properties.getProperty("JOBS_CALENDAR_ID"),
+    apiToken: properties.getProperty("DASHBOARD_API_TOKEN"),
+  };
+
+  return config;
+}
+
+function getDashboardSpreadsheet_() {
+  var spreadsheetId = getConfig_().spreadsheetId;
+  if (!spreadsheetId) throw new Error("Dashboard spreadsheet is not configured.");
+  return SpreadsheetApp.openById(spreadsheetId);
+}
+
 var CANONICAL_HEADERS = [
   "jobId",
   "requestId",
@@ -151,7 +170,7 @@ function handleRequest_(request) {
 }
 
 function listJobs_() {
-  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var spreadsheet = getDashboardSpreadsheet_();
   var bookingsRows = readSheetRows_(spreadsheet, CONFIG.bookingsSheetName);
   var jobsRows = readSheetRows_(spreadsheet, CONFIG.jobsSheetName);
   var jobsByKey = {};
@@ -264,7 +283,7 @@ function matchesPayload_(job, payload) {
 }
 
 function saveJobRecord_(job) {
-  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var spreadsheet = getDashboardSpreadsheet_();
   var sheet = spreadsheet.getSheetByName(CONFIG.jobsSheetName);
   if (!sheet) {
     sheet = spreadsheet.insertSheet(CONFIG.jobsSheetName);
@@ -562,11 +581,8 @@ function compareJobs_(a, b) {
 }
 
 function createCalendarEvent_(job) {
-  var calendarId = PropertiesService.getScriptProperties().getProperty("JOBS_CALENDAR_ID");
-  if (!calendarId) {
-    throw new Error("Missing script property JOBS_CALENDAR_ID.");
-  }
-
+  var calendarId = getConfig_().jobsCalendarId;
+  if (!calendarId) throw new Error("Jobs calendar is not configured.");
   var calendar = CalendarApp.getCalendarById(calendarId);
   if (!calendar) {
     throw new Error("Jobs calendar not found.");
@@ -790,12 +806,9 @@ function mergeObjects_(base, override) {
 }
 
 function assertAuthorized_(request) {
-  var configuredToken = PropertiesService.getScriptProperties().getProperty("DASHBOARD_API_TOKEN");
-  if (!configuredToken) {
+  var configuredToken = getConfig_().apiToken;
+  if (!configuredToken || configuredToken.length < 32) {
     throw new Error("Dashboard API token is not configured.");
-  }
-  if (String(configuredToken).length < 32) {
-    throw new Error("Dashboard API token must be at least 32 characters.");
   }
 
   var candidate = request && request.token;

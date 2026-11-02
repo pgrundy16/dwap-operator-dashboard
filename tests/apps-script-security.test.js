@@ -4,15 +4,21 @@ import vm from "node:vm";
 import { test } from "node:test";
 
 const configuredToken = "synthetic-apps-script-token-for-tests-only";
+const configuredProperties = {
+  DASHBOARD_API_TOKEN: configuredToken,
+  DASHBOARD_SPREADSHEET_ID: "synthetic-test-sheet-id",
+  JOBS_CALENDAR_ID: "synthetic-test-calendar-id",
+};
 const source = readFileSync(new URL("../apps-script/Code.gs", import.meta.url), "utf8");
 
 function loadScript() {
   const context = vm.createContext({
     PropertiesService: {
       getScriptProperties: () => ({
-        getProperty: (name) => name === "DASHBOARD_API_TOKEN" ? configuredToken : null,
+        getProperty: (name) => configuredProperties[name] || null,
       }),
     },
+    SpreadsheetApp: { openById: (spreadsheetId) => ({ spreadsheetId }) },
     ContentService: {
       MimeType: { JSON: "application/json" },
       createTextOutput: (text) => ({ text, setMimeType() { return this; } }),
@@ -64,6 +70,13 @@ test("Apps Script rejects oversized bodies before parsing them", () => {
   const result = readResponse(script.doPost({ postData: { contents: "x".repeat(16385) } }));
   assert.equal(result.ok, false);
   assert.equal(result.error, "Request body is too large.");
+});
+
+test("dashboard Apps Script uses configured spreadsheet ID and has no bound-sheet dependency", () => {
+  const script = loadScript();
+  assert.equal(script.getDashboardSpreadsheet_().spreadsheetId, "synthetic-test-sheet-id");
+  assert.equal(source.includes("getActiveSpreadsheet"), false);
+  assert.equal(script.getConfig_().jobsCalendarId, "synthetic-test-calendar-id");
 });
 
 test("booking normalization accepts the website service JSON field and display durations", () => {

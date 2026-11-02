@@ -32,7 +32,15 @@ The browser stores only an `HttpOnly`, `SameSite=Strict` session cookie. The coo
 
 ## Apps Script
 
-The source is `apps-script/Code.gs`. Deploy it as a Web App bound to the booking spreadsheet, and set script properties `DASHBOARD_API_TOKEN` and `JOBS_CALENDAR_ID`. The deployment can be callable by anyone because Apps Script web apps need a public HTTP entry point for the server gateway; it returns no customer data unless a valid token arrives in the POST JSON body. GET requests are rejected, and a token in the URL query string is not accepted. The Vercel gateway sends the token in the POST body and never returns it to the browser. Keep the script deployment URL and token out of browser code and Git.
+The source is `apps-script/Code.gs`. Create a **standalone Apps Script project** (not a script attached to a spreadsheet), add `Code.gs` and `appsscript.json`, and deploy it as a Web App. It opens the configured booking workbook by ID and reads its calendar ID and API token from **Project Settings → Script Properties**:
+
+| Script Property | Purpose |
+| --- | --- |
+| `DASHBOARD_SPREADSHEET_ID` | ID from the test booking Sheet URL |
+| `JOBS_CALENDAR_ID` | ID of the test service booking calendar |
+| `DASHBOARD_API_TOKEN` | Random token of at least 32 characters; must match Vercel's server-only setting |
+
+Set the Web App to execute as you, and make it callable by the Vercel gateway. The public HTTP entry point returns no customer data unless a valid token arrives in the POST JSON body. GET requests are rejected, and a token in the URL query string is not accepted. The Vercel gateway sends the token in the POST body and never returns it to the browser. Keep the script deployment URL and token out of browser code and Git.
 
 The gateway accepts only the `listJobs` read path and the `sendDeposit`, `confirmBooking`, and `completeJob` write actions. Write inputs are restricted to job/request IDs and action-specific fields. Amounts and durations must be bounded, finite, nonnegative numbers; payment links must be valid HTTPS URLs. Upstream Apps Script failures, timeouts, invalid responses, and missing configuration return sanitized errors without customer data or credentials.
 
