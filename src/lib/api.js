@@ -82,7 +82,7 @@ function normalizeJob(record) {
   }
   if (typeof normalized.serviceDetails !== "object" || normalized.serviceDetails === null || Array.isArray(normalized.serviceDetails)) normalized.serviceDetails = {};
   if (!Array.isArray(normalized.riskFlags)) normalized.riskFlags = [];
-  for (const field of ["stairsInvolved", "elevatorAtPickup", "elevatorAtDropoff", "depositPaid"]) {
+  for (const field of ["stairsInvolved", "elevatorAtPickup", "elevatorAtDropoff", "depositPaid", "balanceCollected"]) {
     normalized[field] = normalized[field] === true;
   }
   normalized.status = (normalized.status || "NEW").trim().toUpperCase();
@@ -98,6 +98,7 @@ async function postAction(action, payload) {
   return data.job;
 }
 
+export const updateBooking = (payload) => postAction("updateBooking", payload);
 export const sendDeposit = (payload) => postAction("sendDeposit", payload);
 export const confirmBooking = (payload) => postAction("confirmBooking", payload);
 export const completeJob = (payload) => postAction("completeJob", payload);
