@@ -1,6 +1,6 @@
 import { isAuthenticated, noStore, sameOrigin } from "../server/auth.js";
 
-const ACTIONS = new Set(["sendDeposit", "confirmBooking", "completeJob"]);
+const ACTIONS = new Set(["sendDeposit", "confirmBooking", "completeJob", "updateBooking"]);
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_IDENTIFIER_LENGTH = 128;
 const MAX_PAYMENT_LINK_LENGTH = 2048;
@@ -50,7 +50,9 @@ function validateActionPayload(body) {
   const { action } = body;
   if (!ACTIONS.has(action)) return { error: "Unsupported action." };
 
-  const allowed = action === "sendDeposit"
+  const allowed = action === "updateBooking"
+    ? new Set(["action", "jobId", "requestId", "preferredDate", "preferredTime", "quoteTotal", "depositAmount", "operatorNotes", "actualDurationHours", "balanceCollected"])
+    : action === "sendDeposit"
     ? new Set(["action", "jobId", "requestId", "quoteTotal", "depositAmount", "balanceDue", "depositLink"])
     : action === "completeJob"
       ? new Set(["action", "jobId", "requestId", "actualDurationHours"])
@@ -68,6 +70,27 @@ function validateActionPayload(body) {
   const normalized = { action };
   if (body.jobId !== undefined) normalized.jobId = body.jobId.trim();
   if (body.requestId !== undefined) normalized.requestId = body.requestId.trim();
+
+  if (action === "updateBooking") {
+    const fields = ["preferredDate", "preferredTime", "quoteTotal", "depositAmount", "operatorNotes", "actualDurationHours", "balanceCollected"];
+    if (!fields.some((field) => Object.hasOwn(body, field))) return { error: "No changes supplied." };
+    for (const field of fields) {
+      if (!Object.hasOwn(body, field)) continue;
+      const value = body[field];
+      if (field === "preferredDate") {
+        if (typeof value !== "string" || !/^\\d{4}-\\d{2}-\\d{2}$/.test(value) || new Date(value + "T12:00:00Z").toISOString().slice(0, 10) !== value) return { error: "Invalid proposed date." };
+      } else if (field === "preferredTime") {
+        if (typeof value !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(value)) return { error: "Invalid proposed time." };
+      } else if (field === "operatorNotes") {
+        if (typeof value !== "string" || value.length > 5000 || /[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f]/.test(value)) return { error: "Invalid operator notes." };
+      } else if (field === "balanceCollected") {
+        if (typeof value !== "boolean") return { error: "Balance-collected must be true or false." };
+      } else if (value !== null && (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > (field === "actualDurationHours" ? 1000 : MAX_MONEY_AMOUNT))) {
+        return { error: "Invalid " + field + "." };
+      }
+      normalized[field] = value;
+    }
+  }
 
   if (action === "sendDeposit") {
     for (const field of ["quoteTotal", "depositAmount", "balanceDue"]) {
