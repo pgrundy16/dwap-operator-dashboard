@@ -7,6 +7,7 @@ import {
   login,
   logout,
   sendDeposit,
+  updateBooking,
 } from "./lib/api";
 import { LoginGate } from "./components/LoginGate";
 import { StatCard } from "./components/StatCard";
@@ -23,6 +24,11 @@ function buildQuoteDraft(job) {
     depositAmount: job?.depositAmount ?? "",
     balanceDue: job?.balanceDue ?? "",
     depositLink: job?.depositLink ?? "",
+    preferredDate: job?.preferredDate ?? "",
+    preferredTime: job?.preferredTime ?? "",
+    operatorNotes: job?.operatorNotes ?? "",
+    actualDurationHours: job?.actualDurationHours ?? "",
+    balanceCollected: job?.balanceCollected === true,
   };
 }
 
@@ -193,6 +199,42 @@ export default function App() {
     }));
   }
 
+  async function handleSave() {
+    if (isDemoMode || !selectedJob) return;
+    const quoteTotal = quoteDraft.quoteTotal === "" ? null : Number(quoteDraft.quoteTotal);
+    const depositAmount = quoteDraft.depositAmount === "" ? null : Number(quoteDraft.depositAmount);
+    const actualDurationHours = quoteDraft.actualDurationHours === "" ? null : Number(quoteDraft.actualDurationHours);
+    if ([quoteTotal, depositAmount, actualDurationHours].some((value) => value !== null && (!Number.isFinite(value) || value < 0))) {
+      setActionError("Amounts and duration must be valid nonnegative numbers."); return;
+    }
+    if (quoteTotal !== null && depositAmount !== null && depositAmount > quoteTotal) {
+      setActionError("Deposit cannot exceed the quote."); return;
+    }
+    const payload = {
+      jobId: selectedJob.jobId, requestId: selectedJob.requestId,
+      preferredDate: quoteDraft.preferredDate, preferredTime: quoteDraft.preferredTime,
+      quoteTotal, depositAmount, actualDurationHours,
+      operatorNotes: quoteDraft.operatorNotes,
+      balanceCollected: quoteDraft.balanceCollected,
+    };
+    if (!window.confirm("Save these booking changes? This updates the operator record" +
+      (selectedJob.status === "CONFIRMED" ? " and reschedules its calendar event." : "."))) return;
+    setIsSaving(true); setActionError("");
+    try {
+      await updateBooking(payload);
+      const refreshed = await fetchJobs();
+      const persisted = refreshed.jobs.find((job) => job.requestId === selectedJob.requestId);
+      if (!persisted) throw new Error("Saved booking could not be reloaded.");
+      for (const key of Object.keys(payload).filter((key) => !["jobId", "requestId"].includes(key))) {
+        if ((persisted[key] ?? null) !== (payload[key] ?? null)) throw new Error("Saved value for " + key + " could not be verified.");
+      }
+      setJobs(refreshed.jobs); setMalformedCount(refreshed.rejectedCount); setSelectedJobId(persisted.jobId);
+    } catch (error) {
+      setActionError(error.message);
+      if (error.status === 401) lockDashboard("Your session expired. Sign in again.");
+    } finally { setIsSaving(false); }
+  }
+
   async function handleSendDeposit() {
     if (isDemoMode) return;
     const quoteTotal = Number(quoteDraft.quoteTotal || 0);
@@ -200,6 +242,8 @@ export default function App() {
     const balanceDue =
       Number(quoteDraft.balanceDue || 0) || Math.max(quoteTotal - depositAmount, 0);
 
+    if (selectedJob.status !== "NEW") return setActionError("Quote recording requires a new request.");
+    if (!window.confirm("Record the quote and deposit as manually sent? This does not send a customer message.")) return;
     setIsSaving(true);
     setActionError("");
     try {
@@ -225,7 +269,8 @@ export default function App() {
   }
 
   async function handleConfirm() {
-    if (isDemoMode) return;
+    if (isDemoMode || selectedJob.status !== "DEPOSIT_SENT") return;
+    if (!window.confirm("Have you manually verified customer acceptance, payment, and schedule? Confirm booking and create a calendar event?")) return;
     setIsSaving(true);
     setActionError("");
     try {
@@ -247,7 +292,8 @@ export default function App() {
   }
 
   async function handleComplete() {
-    if (isDemoMode) return;
+    if (isDemoMode || selectedJob.status !== "CONFIRMED") return;
+    if (!window.confirm("Mark this job complete? Verify job completion and outstanding payment separately.")) return;
     setIsSaving(true);
     setActionError("");
     try {
@@ -399,6 +445,7 @@ export default function App() {
             quoteDraft={quoteDraft}
             onQuoteChange={handleQuoteChange}
             onSendDeposit={handleSendDeposit}
+            onSave={handleSave}
             onConfirm={handleConfirm}
             onComplete={handleComplete}
             isSaving={isSaving}
