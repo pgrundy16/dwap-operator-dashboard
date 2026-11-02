@@ -298,6 +298,7 @@ function completeJob_(payload) {
   var completedAt = payload.completedAt || nowIso_();
   var archiveOn = payload.archiveOn || addDaysIso_(completedAt, CONFIG.doneRetentionDays);
   var actualDurationHours = parseNumber_(payload.actualDurationHours);
+  if (actualDurationHours === null || actualDurationHours <= 0) throw new Error("Explicit actual duration required.");
 
   if (actualDurationHours === null) {
     actualDurationHours = parseNumber_(job.actualDurationHours);
