@@ -240,7 +240,7 @@ export default function App() {
     const quoteTotal = Number(quoteDraft.quoteTotal || 0);
     const depositAmount = Number(quoteDraft.depositAmount || 0);
     const balanceDue =
-      Number(quoteDraft.balanceDue || 0) || Math.max(quoteTotal - depositAmount, 0);
+      Math.max(quoteTotal - depositAmount, 0);
 
     if (selectedJob.status !== "NEW") return setActionError("Quote recording requires a new request.");
     if (!window.confirm("Record the quote and deposit as manually sent? This does not send a customer message.")) return;
@@ -293,6 +293,7 @@ export default function App() {
 
   async function handleComplete() {
     if (isDemoMode || selectedJob.status !== "CONFIRMED") return;
+    if (Number(quoteDraft.actualDurationHours) <= 0 || Number(quoteDraft.actualDurationHours) !== selectedJob.actualDurationHours) return setActionError("Save the actual duration before completing.");
     if (!window.confirm("Mark this job complete? Verify job completion and outstanding payment separately.")) return;
     setIsSaving(true);
     setActionError("");
