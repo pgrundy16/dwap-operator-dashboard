@@ -194,7 +194,15 @@ export default async function handler(req, res) {
 
     const data = await upstream.json();
     if (!isPlainObject(data) || data.ok !== true) {
-      return res.status(502).json({ ok: false, error: "The job service rejected the request." });
+      const message = typeof data?.error === "string" ? data.error : "";
+      // Only return explicitly classified calendar errors; never echo arbitrary
+      // upstream exceptions that might reveal spreadsheet or customer details.
+      const calendarError = /^(Calendar (?:conflict:|requires |time is |event |has |synchronization )|Calendar for Jobs |Scheduled event |No calendar event |Cannot reschedule |Calendar updated but )/.test(message)
+        && message.length <= 450 ? message : null;
+      return res.status(calendarError ? 409 : 502).json({
+        ok: false,
+        error: calendarError || "The job service rejected the request.",
+      });
     }
     if (req.method === "GET") {
       if (!Array.isArray(data.jobs)) {
