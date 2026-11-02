@@ -26,7 +26,8 @@ function harness() {
     Utilities: {
       parseDate(value) { return new Date(value.replace(" ", "T") + ":00-05:00"); },
       formatDate(date) {
-        return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Toronto",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23" }).format(date).replace(", ", " ");
+        const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/Toronto",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23" }).formatToParts(date).filter(p => p.type !== "literal").map(p => [p.type,p.value]));
+        return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
       },
     },
   };
