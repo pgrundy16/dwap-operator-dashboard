@@ -83,33 +83,35 @@ var HEADER_ALIASES = {
 };
 
 function doGet(e) {
-  return handleRequest_({
-    method: "GET",
-    params: e && e.parameter ? e.parameter : {},
-  });
+  return jsonResponse_({ ok: false, error: "Method not allowed." });
 }
 
 function doPost(e) {
-  var payload = {};
-  if (e && e.postData && e.postData.contents) {
-    payload = JSON.parse(e.postData.contents);
-  }
+  try {
+    var rawBody = e && e.postData && e.postData.contents;
+    if (String(rawBody || "").length > 16384) {
+      return jsonResponse_({ ok: false, error: "Request body is too large." });
+    }
+    var payload = JSON.parse(rawBody || "{}");
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return jsonResponse_({ ok: false, error: "A JSON object is required." });
+    }
 
-  return handleRequest_({
-    method: "POST",
-    params: e && e.parameter ? e.parameter : {},
-    payload: payload,
-  });
+    return handleRequest_({ method: "POST", payload: payload });
+  } catch (error) {
+    return jsonResponse_({ ok: false, error: "Invalid JSON request." });
+  }
 }
 
 function handleRequest_(request) {
   try {
-    assertAuthorized_(request);
+    if (!request || request.method !== "POST") {
+      throw new Error("Method not allowed.");
+    }
+    assertAuthorized_(request.payload || {});
 
-    var action =
-      (request.payload && request.payload.action) ||
-      (request.params && request.params.action) ||
-      CONFIG.actions.listJobs;
+    var action = request.payload.action || CONFIG.actions.listJobs;
+    validateDashboardPayload_(action, request.payload || {});
 
     if (action === CONFIG.actions.listJobs) {
       return jsonResponse_({
@@ -779,15 +781,97 @@ function assertAuthorized_(request) {
   if (!configuredToken) {
     throw new Error("Dashboard API token is not configured.");
   }
+  if (String(configuredToken).length < 32) {
+    throw new Error("Dashboard API token must be at least 32 characters.");
+  }
 
-  var candidate =
-    (request.params && request.params.token) ||
-    (request.payload && request.payload.token) ||
-    "";
+  var candidate = request && request.token;
 
-  if (candidate !== configuredToken) {
+  if (typeof candidate !== "string" || !constantTimeEquals_(candidate, String(configuredToken))) {
     throw new Error("Unauthorized.");
   }
+}
+
+function constantTimeEquals_(left, right) {
+  left = String(left || "");
+  right = String(right || "");
+  var difference = left.length ^ right.length;
+  var maxLength = Math.max(left.length, right.length);
+  for (var i = 0; i < maxLength; i += 1) {
+    difference |= (left.charCodeAt(i) || 0) ^ (right.charCodeAt(i) || 0);
+  }
+  return difference === 0;
+}
+
+function validateDashboardPayload_(action, payload) {
+  var allowedActions = [
+    CONFIG.actions.listJobs,
+    CONFIG.actions.sendDeposit,
+    CONFIG.actions.confirmBooking,
+    CONFIG.actions.completeJob,
+  ];
+  if (allowedActions.indexOf(action) === -1) {
+    throw new Error("Unsupported action.");
+  }
+
+  var allowedFields = ["action", "token"];
+  if (action !== CONFIG.actions.listJobs) {
+    allowedFields.push("jobId", "requestId");
+    if (action === CONFIG.actions.sendDeposit) {
+      allowedFields.push("quoteTotal", "depositAmount", "balanceDue", "depositLink");
+    }
+    if (action === CONFIG.actions.completeJob) {
+      allowedFields.push("actualDurationHours");
+    }
+    if (!isValidDashboardId_(payload.jobId) && !isValidDashboardId_(payload.requestId)) {
+      throw new Error("A valid job ID or request ID is required.");
+    }
+    if (payload.jobId !== undefined && !isValidDashboardId_(payload.jobId)) {
+      throw new Error("Invalid job ID.");
+    }
+    if (payload.requestId !== undefined && !isValidDashboardId_(payload.requestId)) {
+      throw new Error("Invalid request ID.");
+    }
+  }
+
+  Object.keys(payload).forEach(function(key) {
+    if (allowedFields.indexOf(key) === -1) {
+      throw new Error("Unsupported request field.");
+    }
+  });
+
+  if (action === CONFIG.actions.sendDeposit) {
+    ["quoteTotal", "depositAmount", "balanceDue"].forEach(function(field) {
+      var value = payload[field];
+      if (typeof value !== "number" || !isFinite(value) || value < 0 || value > 100000000) {
+        throw new Error("Invalid quote or deposit amount.");
+      }
+    });
+    if (payload.depositLink !== undefined) {
+      if (typeof payload.depositLink !== "string" || payload.depositLink.length > 2048) {
+        throw new Error("Invalid payment link.");
+      }
+      if (payload.depositLink && !/^https:\/\/[a-z0-9.-]+(?::\d+)?(?:[/?#][^\s]*)?$/i.test(payload.depositLink)) {
+        throw new Error("Payment link must use HTTPS.");
+      }
+    }
+  }
+
+  if (action === CONFIG.actions.completeJob && payload.actualDurationHours !== undefined) {
+    if (typeof payload.actualDurationHours !== "number" ||
+        !isFinite(payload.actualDurationHours) ||
+        payload.actualDurationHours < 0 ||
+        payload.actualDurationHours > 1000) {
+      throw new Error("Invalid actual duration.");
+    }
+  }
+}
+
+function isValidDashboardId_(value) {
+  return typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.length <= 128 &&
+    !/[\u0000-\u001f\u007f]/.test(value);
 }
 
 function jsonResponse_(payload) {

@@ -20,11 +20,14 @@ async function request(url, options = {}) {
 
 export async function getSession() {
   const data = await request("/api/session");
-  return data.authenticated === true;
+  return {
+    authenticated: data.authenticated === true,
+    expiresAt: Number.isFinite(data.expiresAt) ? data.expiresAt : null,
+  };
 }
 
 export async function login(passphrase) {
-  await request("/api/session", {
+  return request("/api/session", {
     method: "POST",
     body: JSON.stringify({ passphrase }),
   });

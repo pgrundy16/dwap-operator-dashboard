@@ -14,8 +14,8 @@ const originalFetch = globalThis.fetch;
 before(() => {
   process.env.DASHBOARD_PASSPHRASE = "synthetic-test-passphrase-only";
   process.env.DASHBOARD_SESSION_SECRET = "synthetic-test-session-key-at-least-32-characters";
-  process.env.DASHBOARD_APPS_SCRIPT_URL = "https://example.invalid/apps-script";
-  process.env.DASHBOARD_API_TOKEN = "synthetic-test-token";
+  process.env.DASHBOARD_APPS_SCRIPT_URL = "https://script.google.com/macros/s/test-deployment/exec";
+  process.env.DASHBOARD_API_TOKEN = "synthetic-test-token-for-api-gateway-only";
 });
 
 after(() => {
@@ -44,6 +44,7 @@ test("job data requires a valid server session", async () => {
   await jobsHandler({ method: "GET", headers: {} }, res);
   assert.equal(res.code, 401);
   assert.equal(res.headers["cache-control"], "no-store, private");
+  assert.equal(JSON.stringify(res.body).includes("customerName"), false);
 });
 
 test("login rejects bad credentials and a foreign origin", () => {
@@ -76,6 +77,7 @@ test("signed, HTTP-only session permits proxied reads without revealing token", 
   assert.deepEqual(res.body, { ok: true, jobs: [] });
   assert.equal(sent.token, process.env.DASHBOARD_API_TOKEN);
   assert.equal(JSON.stringify(res.body).includes(process.env.DASHBOARD_API_TOKEN), false);
+  assert.equal(res.headers["cache-control"], "no-store, private");
 
   const tampered = response();
   await jobsHandler({ method: "GET", headers: { cookie: cookie + "x" } }, tampered);
@@ -94,4 +96,119 @@ test("writes require same origin and an allowed action", async () => {
   const unsupported = response();
   await jobsHandler({ method: "POST", headers: { ...sameOriginHeaders, cookie }, body: { action: "listJobs", jobId: "TEST-1" } }, unsupported);
   assert.equal(unsupported.code, 400);
+});
+
+test("sessions expire server-side and the session endpoint reports expiry", () => {
+  const originalNow = Date.now;
+  let currentTime = 1_800_000_000_000;
+  Date.now = () => currentTime;
+  try {
+    const login = response();
+    sessionHandler({ method: "POST", headers: sameOriginHeaders, body: { passphrase: process.env.DASHBOARD_PASSPHRASE } }, login);
+    const cookie = login.headers["set-cookie"].split(";")[0];
+    assert.equal(login.body.expiresAt, Math.floor(currentTime / 1000) + 12 * 60 * 60);
+
+    const active = response();
+    sessionHandler({ method: "GET", headers: { cookie } }, active);
+    assert.equal(active.body.authenticated, true);
+    assert.equal(active.body.expiresAt, login.body.expiresAt);
+
+    currentTime += 12 * 60 * 60 * 1000 + 1000;
+    const expired = response();
+    sessionHandler({ method: "GET", headers: { cookie } }, expired);
+    assert.equal(expired.body.authenticated, false);
+    assert.equal(expired.body.expiresAt, null);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("job writes reject invalid fields before calling Apps Script", async () => {
+  const login = response();
+  sessionHandler({ method: "POST", headers: sameOriginHeaders, body: { passphrase: process.env.DASHBOARD_PASSPHRASE } }, login);
+  const cookie = login.headers["set-cookie"].split(";")[0];
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return { ok: true, json: async () => ({ ok: true, job: {} }) };
+  };
+
+  const cases = [
+    { action: "confirmBooking", jobId: "TEST-1", extra: "unexpected" },
+    { action: "sendDeposit", jobId: "TEST-1", quoteTotal: "10", depositAmount: 2, balanceDue: 8 },
+    { action: "sendDeposit", jobId: "TEST-1", quoteTotal: 10, depositAmount: 2, balanceDue: 8, depositLink: "javascript:alert(1)" },
+    { action: "sendDeposit", jobId: "TEST-1", quoteTotal: 100_000_001, depositAmount: 2, balanceDue: 8 },
+    { action: "sendDeposit", jobId: "TEST-1", quoteTotal: 10, depositAmount: 2, balanceDue: 8, depositLink: "https://user:password@square.example/pay" },
+    { action: "completeJob", requestId: "request-1", actualDurationHours: Infinity },
+    { action: "confirmBooking", jobId: "\n" },
+  ];
+
+  for (const body of cases) {
+    const res = response();
+    await jobsHandler({ method: "POST", headers: { ...sameOriginHeaders, cookie }, body }, res);
+    assert.equal(res.code, 400);
+    assert.equal(res.body.ok, false);
+  }
+  assert.equal(fetchCalls, 0);
+});
+
+test("job gateway rejects oversized write bodies", async () => {
+  const login = response();
+  sessionHandler({ method: "POST", headers: sameOriginHeaders, body: { passphrase: process.env.DASHBOARD_PASSPHRASE } }, login);
+  const cookie = login.headers["set-cookie"].split(";")[0];
+  const res = response();
+  await jobsHandler({
+    method: "POST",
+    headers: { ...sameOriginHeaders, cookie, "content-length": String(16 * 1024 + 1) },
+    body: { action: "confirmBooking", jobId: "TEST-1" },
+  }, res);
+  assert.equal(res.code, 413);
+});
+
+test("gateway rejects non-Apps Script upstream configuration", async () => {
+  const login = response();
+  sessionHandler({ method: "POST", headers: sameOriginHeaders, body: { passphrase: process.env.DASHBOARD_PASSPHRASE } }, login);
+  const cookie = login.headers["set-cookie"].split(";")[0];
+  const originalUrl = process.env.DASHBOARD_APPS_SCRIPT_URL;
+  let fetchCalls = 0;
+  process.env.DASHBOARD_APPS_SCRIPT_URL = "https://script.google.com:8443/macros/s/test-deployment/exec";
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("Unexpected fetch");
+  };
+  try {
+    const res = response();
+    await jobsHandler({ method: "GET", headers: { cookie } }, res);
+    assert.equal(res.code, 503);
+    assert.equal(fetchCalls, 0);
+    assert.equal(JSON.stringify(res.body).includes(process.env.DASHBOARD_API_TOKEN), false);
+  } finally {
+    process.env.DASHBOARD_APPS_SCRIPT_URL = originalUrl;
+  }
+});
+
+test("job response data is available only to an authenticated session", async () => {
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      json: async () => ({ ok: true, jobs: [{ customerName: "Sample Customer", email: "sample@example.com" }] }),
+    };
+  };
+
+  const denied = response();
+  await jobsHandler({ method: "GET", headers: {} }, denied);
+  assert.equal(denied.code, 401);
+  assert.equal(JSON.stringify(denied.body).includes("Sample Customer"), false);
+  assert.equal(fetchCalls, 0);
+
+  const login = response();
+  sessionHandler({ method: "POST", headers: sameOriginHeaders, body: { passphrase: process.env.DASHBOARD_PASSPHRASE } }, login);
+  const cookie = login.headers["set-cookie"].split(";")[0];
+  const allowed = response();
+  await jobsHandler({ method: "GET", headers: { cookie } }, allowed);
+  assert.equal(allowed.code, 200);
+  assert.equal(allowed.body.jobs[0].customerName, "Sample Customer");
+  assert.equal(fetchCalls, 1);
 });

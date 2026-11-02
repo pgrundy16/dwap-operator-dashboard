@@ -13,29 +13,37 @@ The shared system design is documented in `docs/architecture.md`, `docs/data-con
 
 This version does not send customer email/text messages, create Square invoices, or verify payment. The quote button records details; it does not deliver a deposit link.
 
-## Private server configuration
+## Server configuration
 
-Set these values in the Vercel project's server environment settings. For local full-stack development, use an ignored local environment file with `vercel dev`; `npm run dev` serves only the Vite frontend and cannot run `/api` functions.
+The Vercel API routes are the only path from the browser to Apps Script. They require a valid signed session before reading customer records or writing job updates. The Apps Script URL must be an HTTPS deployment URL in the `script.google.com/macros/s/<deployment-id>/exec` form; the gateway rejects other hosts, query strings, and URL credentials.
+
+Set these values in Vercel **server** environment settings. For local full-stack development, create an ignored `.env.local` from `.env.example` and use `vercel dev`; `npm run dev` serves only the Vite frontend and cannot run `/api` functions.
 
 | Name | Purpose |
 | --- | --- |
-| `DASHBOARD_APPS_SCRIPT_URL` | Deployed Apps Script `/exec` URL |
-| `DASHBOARD_API_TOKEN` | Same random token stored as Apps Script script property `DASHBOARD_API_TOKEN` |
-| `DASHBOARD_PASSPHRASE` | Operator passphrase, at least 16 characters |
-| `DASHBOARD_SESSION_SECRET` | Independent random session-signing value, at least 32 characters |
+| `DASHBOARD_APPS_SCRIPT_URL` | HTTPS Apps Script `/exec` URL, with no query string |
+| `DASHBOARD_API_TOKEN` | Random bearer token of at least 32 characters, stored only in the Apps Script `DASHBOARD_API_TOKEN` property and Vercel server settings |
+| `DASHBOARD_PASSPHRASE` | High-entropy operator passphrase, at least 16 characters |
+| `DASHBOARD_SESSION_SECRET` | Independent random session-signing secret, at least 32 characters |
 
-Do not use `VITE_` variables for secrets. Vite includes those values in the browser bundle. Never commit a populated `.env` file.
+Generate the API token, passphrase, and session secret independently. Use a password manager or a trusted local random generator; never reuse the Apps Script token as the login passphrase or session secret. Set production values only in the Vercel Production environment. Use separate test-only values for Preview or Development, and point those environments only at synthetic data. Do not use `VITE_` variables for secrets; Vite includes them in the browser bundle. Never commit a populated `.env` file.
+
+The browser stores only an `HttpOnly`, `SameSite=Strict` session cookie. The cookie is signed with `DASHBOARD_SESSION_SECRET`, scoped to `/api`, marked `Secure` in production, and expires after 12 hours. Every `/api/jobs` call rechecks it. The dashboard hides and clears customer data when the server reports expiration, and asks the operator to sign in again. Writes require a same-origin request and allowlisted action; fields and values are validated before the server calls Apps Script. Responses are marked `no-store`.
 
 ## Apps Script
 
-The source is `apps-script/Code.gs`. Deploy it as a Web App bound to the booking spreadsheet, and set script properties `DASHBOARD_API_TOKEN` and `JOBS_CALENDAR_ID`. The script now rejects requests if the token property is missing. Keep the script deployment URL and token private.
+The source is `apps-script/Code.gs`. Deploy it as a Web App bound to the booking spreadsheet, and set script properties `DASHBOARD_API_TOKEN` and `JOBS_CALENDAR_ID`. The deployment can be callable by anyone because Apps Script web apps need a public HTTP entry point for the server gateway; it returns no customer data unless a valid token arrives in the POST JSON body. GET requests are rejected, and a token in the URL query string is not accepted. The Vercel gateway sends the token in the POST body and never returns it to the browser. Keep the script deployment URL and token out of browser code and Git.
+
+The gateway accepts only the `listJobs` read path and the `sendDeposit`, `confirmBooking`, and `completeJob` write actions. Write inputs are restricted to job/request IDs and action-specific fields. Amounts and durations must be bounded, finite, nonnegative numbers; payment links must be valid HTTPS URLs. Upstream Apps Script failures, timeouts, invalid responses, and missing configuration return sanitized errors without customer data or credentials.
+
+This is single-operator authentication: the app has one shared passphrase and no individual accounts, roles, or attribution for changes. It also has no durable cross-instance login rate limiter. Treat it as a portfolio/single-operator gateway; before relying on it for a wider public deployment, add an identity provider and durable abuse controls.
 
 The script expects `Sheet1` for booking intake and `Jobs` for operator updates. Confirm the actual sheet headers before using it with live data.
 
 ## Rotate the previously exposed credential
 
-The previous client source contained a token and passphrase. Generate a new token and passphrase, replace the Apps Script token property and Vercel server environment values, then redeploy. Revoke/remove the old values. Also generate a fresh, unrelated session secret so earlier sessions expire. If the former token was ever committed, distributed, or deployed, treat it as exposed even after removing it from the current source.
+If an earlier token or passphrase was exposed, replace the Apps Script token property and matching Vercel server value with a new random token, choose a new passphrase, and set a new independent session secret. Redeploy after changing Vercel values; the session secret change invalidates prior cookies. Revoke/remove old values. If a credential was ever committed, distributed, or deployed, treat it as exposed even after removing it from the current source.
 
 ## Verification
 
-Run `npm install` and `npm run build` for the frontend. Use the full-stack deployment or `vercel dev` to check sign-in, sign-out, an unauthorized `/api/jobs` request, job listing, and one test update. Use synthetic booking records for portfolio screenshots.
+Run `npm install`, `npm test`, and `npm run build`. Use the full-stack deployment or `vercel dev` to check sign-in, sign-out, an unauthorized `/api/jobs` request, session expiration, job listing, invalid input rejection, and one synthetic test update. Use synthetic booking records for portfolio screenshots.

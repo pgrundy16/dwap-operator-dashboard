@@ -1,11 +1,12 @@
-import { clearSession, isAuthenticated, noStore, sameOrigin, setSession, validPassphrase } from "../server/auth.js";
+import { clearSession, noStore, sameOrigin, sessionExpiresAt, setSession, validPassphrase } from "../server/auth.js";
 
 export default function handler(req, res) {
   noStore(res);
 
   if (req.method === "GET") {
     try {
-      return res.status(200).json({ ok: true, authenticated: isAuthenticated(req) });
+      const expiresAt = sessionExpiresAt(req);
+      return res.status(200).json({ ok: true, authenticated: expiresAt !== null, expiresAt });
     } catch {
       return res.status(503).json({ ok: false, error: "Dashboard authentication is not configured." });
     }
@@ -30,8 +31,8 @@ export default function handler(req, res) {
     if (!validPassphrase(passphrase)) {
       return res.status(401).json({ ok: false, error: "Incorrect passphrase." });
     }
-    setSession(res);
-    return res.status(200).json({ ok: true });
+    const expiresAt = setSession(res);
+    return res.status(200).json({ ok: true, expiresAt });
   } catch {
     return res.status(503).json({ ok: false, error: "Dashboard authentication is not configured." });
   }

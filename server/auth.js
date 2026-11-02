@@ -5,6 +5,8 @@ const SESSION_SECONDS = 12 * 60 * 60;
 
 export function noStore(res) {
   res.setHeader("Cache-Control", "no-store, private");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Vary", "Cookie");
   res.setHeader("X-Content-Type-Options", "nosniff");
 }
 
@@ -59,6 +61,7 @@ export function setSession(res) {
   const token = `${value}.${sign(value)}`;
   const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
   res.setHeader("Set-Cookie", `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=${SESSION_SECONDS}${secure}`);
+  return expires;
 }
 
 export function clearSession(res) {
@@ -66,14 +69,18 @@ export function clearSession(res) {
   res.setHeader("Set-Cookie", `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/api; Max-Age=0${secure}`);
 }
 
-export function isAuthenticated(req) {
+export function sessionExpiresAt(req) {
   requireConfig(["DASHBOARD_SESSION_SECRET"]);
   const cookies = String(req.headers.cookie || "").split(";").map((part) => part.trim());
   const raw = cookies.find((part) => part.startsWith(`${COOKIE_NAME}=`));
-  if (!raw) return false;
+  if (!raw) return null;
   const token = raw.slice(COOKIE_NAME.length + 1);
   const [expires, signature, extra] = token.split(".");
-  if (extra || !/^\d+$/.test(expires || "") || !signature) return false;
-  if (Number(expires) <= Math.floor(Date.now() / 1000)) return false;
-  return secureEqual(signature, sign(expires));
+  if (extra || !/^\d+$/.test(expires || "") || !signature) return null;
+  if (Number(expires) <= Math.floor(Date.now() / 1000)) return null;
+  return secureEqual(signature, sign(expires)) ? Number(expires) : null;
+}
+
+export function isAuthenticated(req) {
+  return sessionExpiresAt(req) !== null;
 }

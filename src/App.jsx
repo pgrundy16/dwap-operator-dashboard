@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   completeJob,
   confirmBooking,
@@ -25,6 +25,7 @@ function buildQuoteDraft(job) {
 
 export default function App() {
   const [isUnlocked, setIsUnlocked] = useState(false);
+  const [sessionExpiresAt, setSessionExpiresAt] = useState(null);
   const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [loginError, setLoginError] = useState("");
   const [jobs, setJobs] = useState([]);
@@ -35,11 +36,24 @@ export default function App() {
   const [dataError, setDataError] = useState("");
   const [actionError, setActionError] = useState("");
 
+  const lockDashboard = useCallback((message = "") => {
+    setIsUnlocked(false);
+    setSessionExpiresAt(null);
+    setJobs([]);
+    setSelectedJobId("");
+    setQuoteDraft(buildQuoteDraft(null));
+    setDataError("");
+    setActionError("");
+    setLoginError(message);
+  }, []);
+
   useEffect(() => {
     let active = true;
     getSession()
-      .then((authenticated) => {
-        if (active) setIsUnlocked(authenticated);
+      .then((session) => {
+        if (!active) return;
+        setIsUnlocked(session.authenticated);
+        setSessionExpiresAt(session.expiresAt);
       })
       .catch((error) => {
         if (active) setLoginError(error.message);
@@ -49,6 +63,30 @@ export default function App() {
       });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (!isUnlocked || !sessionExpiresAt) return undefined;
+    const expiresInMs = sessionExpiresAt * 1000 - Date.now();
+    if (expiresInMs <= 0) {
+      lockDashboard("Your session expired. Sign in again.");
+      return undefined;
+    }
+
+    const timer = window.setTimeout(
+      () => lockDashboard("Your session expired. Sign in again."),
+      expiresInMs,
+    );
+    function checkExpiryOnReturn() {
+      if (Date.now() >= sessionExpiresAt * 1000) {
+        lockDashboard("Your session expired. Sign in again.");
+      }
+    }
+    document.addEventListener("visibilitychange", checkExpiryOnReturn);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", checkExpiryOnReturn);
+    };
+  }, [isUnlocked, sessionExpiresAt, lockDashboard]);
 
   useEffect(() => {
     if (!isUnlocked) return;
@@ -67,7 +105,7 @@ export default function App() {
       } catch (error) {
         if (!isMounted) return;
         setDataError(error.message);
-        if (error.status === 401) setIsUnlocked(false);
+        if (error.status === 401) lockDashboard("Your session expired. Sign in again.");
       } finally {
         if (isMounted) {
           setIsLoading(false);
@@ -80,7 +118,7 @@ export default function App() {
     return () => {
       isMounted = false;
     };
-  }, [isUnlocked]);
+  }, [isUnlocked, lockDashboard]);
 
   const selectedJob = useMemo(
     () => jobs.find((job) => job.jobId === selectedJobId) || jobs[0],
@@ -113,8 +151,9 @@ export default function App() {
   async function handleUnlock(input) {
     setLoginError("");
     try {
-      await login(input);
+      const session = await login(input);
       setIsUnlocked(true);
+      setSessionExpiresAt(session.expiresAt);
     } catch (error) {
       setLoginError(error.message);
     }
@@ -123,9 +162,7 @@ export default function App() {
   async function handleLogout() {
     try {
       await logout();
-      setIsUnlocked(false);
-      setJobs([]);
-      setSelectedJobId("");
+      lockDashboard();
     } catch (error) {
       setActionError(error.message);
     }
@@ -173,7 +210,7 @@ export default function App() {
       });
     } catch (error) {
       setActionError(error.message);
-      if (error.status === 401) setIsUnlocked(false);
+      if (error.status === 401) lockDashboard("Your session expired. Sign in again.");
     } finally {
       setIsSaving(false);
     }
@@ -194,7 +231,7 @@ export default function App() {
       });
     } catch (error) {
       setActionError(error.message);
-      if (error.status === 401) setIsUnlocked(false);
+      if (error.status === 401) lockDashboard("Your session expired. Sign in again.");
     } finally {
       setIsSaving(false);
     }
@@ -217,7 +254,7 @@ export default function App() {
       });
     } catch (error) {
       setActionError(error.message);
-      if (error.status === 401) setIsUnlocked(false);
+      if (error.status === 401) lockDashboard("Your session expired. Sign in again.");
     } finally {
       setIsSaving(false);
     }
