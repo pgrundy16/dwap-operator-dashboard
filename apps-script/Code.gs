@@ -65,6 +65,7 @@ var CANONICAL_HEADERS = [
   "archiveOn",
   "riskFlags",
   "calendarEventId",
+  "bookingCalendarEventId",
   "balanceCollected",
 ];
 
@@ -100,7 +101,8 @@ var HEADER_ALIASES = {
   operatorNotes: ["operatorNotes", "operator_notes", "Operator Notes"],
   archiveOn: ["archiveOn", "archive_on", "Archive On"],
   riskFlags: ["riskFlags", "risk_flags", "Risk Flags"],
-  calendarEventId: ["calendarEventId", "calendar_event_id", "Calendar Event ID"],
+  calendarEventId: ["calendarEventId", "calendar_event_id", "Jobs Calendar Event ID"],
+  bookingCalendarEventId: ["bookingCalendarEventId", "Booking Calendar Event ID", "Calendar Event ID"],
   balanceCollected: ["balanceCollected", "Balance Collected"],
 };
 
@@ -178,7 +180,12 @@ function handleRequest_(request) {
 
 function listJobs_() {
   var spreadsheet = getDashboardSpreadsheet_();
-  var bookingsRows = readSheetRows_(spreadsheet, CONFIG.bookingsSheetName);
+  var bookingsRows = readSheetRows_(spreadsheet, CONFIG.bookingsSheetName).map(function(row) {
+    // The intake calendar ID is NOT a Jobs calendar event ID.
+    row.bookingCalendarEventId = row.bookingCalendarEventId || row.calendarEventId || "";
+    row.calendarEventId = "";
+    return row;
+  });
   var jobsRows = readSheetRows_(spreadsheet, CONFIG.jobsSheetName);
   var jobsByKey = {};
 
@@ -230,19 +237,32 @@ function updateBooking_(payload) {
     if (patch.balanceCollected === true && normalizeStatus_(job.status) !== "DONE") {
       throw new Error("Balance may only be marked collected when the job is complete.");
     }
-    var scheduleChanged = (patch.preferredDate !== undefined && patch.preferredDate !== job.preferredDate) || (patch.preferredTime !== undefined && patch.preferredTime !== job.preferredTime);
-    if (normalizeStatus_(job.status) === "DONE" && scheduleChanged) throw new Error("Cannot reschedule a completed job.");
     var updated = mergeObjects_(job, patch);
+    var scheduleChanged = updated.preferredDate !== job.preferredDate ||
+      updated.preferredTime !== job.preferredTime;
+    if (job.status === "DONE" && scheduleChanged) throw new Error("Cannot reschedule a completed job.");
+
     if (job.status === "CONFIRMED" && scheduleChanged) {
-      if (!job.calendarEventId) throw new Error("No calendar event for rescheduling.");
-      var calendar = CalendarApp.getCalendarById(getConfig_().jobsCalendarId);
-      var event = calendar && calendar.getEventById(job.calendarEventId);
-      if (!event) throw new Error("Scheduled event not found. No changes saved.");
-      var start = buildEventStart_(updated);
-      var end = new Date(start.getTime() + (parseNumber_(updated.estimatedTimeHours) || 2) * 3600000);
-      event.setTime(start, end);
+      var calendar = getJobsCalendar_();
+      var event = findJobsEvent_(calendar, job);
+      if (!event) throw new Error("Calendar event could not be found. Booking was not rescheduled.");
+      var period = calendarPeriod_(updated);
+      assertCalendarAvailable_(calendar, period.start, period.end, event.getId());
+      var previousStart = event.getStartTime();
+      var previousEnd = event.getEndTime();
+      event.setTime(period.start, period.end);
+      updated.calendarEventId = event.getId();
+      try {
+        saveJobRecord_(updated);
+      } catch (error) {
+        try { event.setTime(previousStart, previousEnd); } catch (rollbackError) {
+          throw new Error("Calendar updated but saving failed; manual reconciliation required.");
+        }
+        throw error;
+      }
+    } else {
+      saveJobRecord_(updated);
     }
-    saveJobRecord_(updated);
     return getExistingJobRecord_(payload);
   } finally {
     lock.releaseLock();
@@ -275,21 +295,41 @@ function updateJobForDeposit_(payload) {
 }
 
 function confirmBooking_(payload) {
-  var job = getExistingJobRecord_(payload);
-  assertStatus_(job, ["DEPOSIT_SENT"], "confirm booking");
-  var wasConfirmed = false;
-  var updated = mergeObjects_(job, {
-    status: CONFIG.statusConfirmed,
-    depositPaid: false,
-    confirmedAt: job.confirmedAt || nowIso_(),
-  });
-
-  if (!updated.calendarEventId && !wasConfirmed) {
-    updated.calendarEventId = createCalendarEvent_(updated);
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var job = getExistingJobRecord_(payload);
+    assertStatus_(job, ["DEPOSIT_SENT", "CONFIRMED"], "confirm booking");
+    var calendar = getJobsCalendar_();
+    var period = calendarPeriod_(job);
+    var event = findJobsEvent_(calendar, job);
+    if (event) {
+      // Repeated clicks and network retries must reuse the same Jobs event.
+      if (event.getStartTime().getTime() !== period.start.getTime() ||
+          event.getEndTime().getTime() !== period.end.getTime()) {
+        throw new Error("Calendar event time differs from the booking. Reconcile before confirming.");
+      }
+    } else {
+      assertCalendarAvailable_(calendar, period.start, period.end, "");
+      event = createCalendarEvent_(job, calendar, period);
+    }
+    var updated = mergeObjects_(job, {
+      status: CONFIG.statusConfirmed,
+      depositPaid: job.depositPaid === true,
+      confirmedAt: job.confirmedAt || nowIso_(),
+      calendarEventId: event.getId(),
+    });
+    // If the spreadsheet write fails after event creation, the Request ID marker
+    // allows a later retry to find that event rather than create a duplicate.
+    saveJobRecord_(updated);
+    var persisted = getExistingJobRecord_(payload);
+    if (persisted.calendarEventId !== event.getId()) {
+      throw new Error("Calendar event exists but event ID did not persist. Reconcile before continuing.");
+    }
+    return persisted;
+  } finally {
+    lock.releaseLock();
   }
-
-  saveJobRecord_(updated);
-  return normalizeJobRecord_(updated);
 }
 
 function completeJob_(payload) {
@@ -639,19 +679,85 @@ function compareJobs_(a, b) {
   return (bDate ? bDate.getTime() : 0) - (aDate ? aDate.getTime() : 0);
 }
 
-function createCalendarEvent_(job) {
+function getJobsCalendar_() {
   var calendarId = getConfig_().jobsCalendarId;
-  if (!calendarId) throw new Error("Jobs calendar is not configured.");
+  if (!calendarId) throw new Error("Calendar synchronization is not configured.");
   var calendar = CalendarApp.getCalendarById(calendarId);
-  if (!calendar) {
-    throw new Error("Jobs calendar not found.");
-  }
+  if (!calendar) throw new Error("Calendar for Jobs was not found or access was denied.");
+  return calendar;
+}
 
-  var start = buildEventStart_(job);
-  var durationHours = parseNumber_(job.estimatedTimeHours) || 2;
-  var end = new Date(start.getTime() + durationHours * 60 * 60 * 1000);
+function calendarPeriod_(job) {
+  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(String(job.preferredDate || "")) ||
+      !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(job.preferredTime || ""))) {
+    throw new Error("Calendar requires a valid proposed date and time.");
+  }
+  var start = Utilities.parseDate(
+    job.preferredDate + " " + job.preferredTime, "America/Toronto", "yyyy-MM-dd HH:mm"
+  );
+  if (!start || isNaN(start.getTime()) ||
+      Utilities.formatDate(start, "America/Toronto", "yyyy-MM-dd HH:mm") !==
+        job.preferredDate + " " + job.preferredTime) {
+    throw new Error("Calendar time is invalid in Montreal/Toronto time (possibly a DST gap).");
+  }
+  var hours = parseNumber_(job.estimatedTimeHours);
+  if (hours === null || hours <= 0 || hours > 24) {
+    throw new Error("Calendar requires a valid estimated duration (0–24 hours).");
+  }
+  return { start: start, end: new Date(start.getTime() + hours * 3600000) };
+}
+
+function findJobsEvent_(calendar, job) {
+  if (job.calendarEventId) {
+    var direct = calendar.getEventById(job.calendarEventId);
+    if (!direct) throw new Error("Calendar event ID is stored but the event is missing. Reconcile manually.");
+    return direct;
+  }
+  // Recover an event created before a failed Sheet write, but only if it has
+  // our exact stable Request ID marker. Never reuse an intake-calendar event.
+  if (!job.requestId) throw new Error("Calendar requires a stable Request ID.");
+  var period = calendarPeriod_(job);
+  var start = new Date(period.start.getTime() - 14 * 86400000);
+  var end = new Date(period.end.getTime() + 14 * 86400000);
+  var marker = "DWAP-Request-ID: " + job.requestId;
+  var matches = calendar.getEvents(start, end).filter(function(event) {
+    return String(event.getDescription() || "").split("\\n").indexOf(marker) !== -1;
+  });
+  if (matches.length > 1) throw new Error("Calendar has duplicate events for this Request ID. Manual reconciliation required.");
+  return matches[0] || null;
+}
+
+function calendarAlternatives_(calendar, start, durationMs, excludedEventId) {
+  var result = [];
+  for (var n = 1; n <= 24 && result.length < 3; n++) {
+    var candidate = new Date(start.getTime() + n * 30 * 60000);
+    var end = new Date(candidate.getTime() + durationMs);
+    if (!calendar.getEvents(candidate, end).some(function(e) {
+      return e.getId() !== excludedEventId;
+    })) {
+      result.push(Utilities.formatDate(candidate, "America/Toronto", "yyyy-MM-dd HH:mm"));
+    }
+  }
+  return result;
+}
+
+function assertCalendarAvailable_(calendar, start, end, excludedEventId) {
+  var busy = calendar.getEvents(start, end).some(function(event) {
+    return event.getId() !== excludedEventId;
+  });
+  if (busy) {
+    var alternatives = calendarAlternatives_(calendar, start, end, excludedEventId);
+    throw new Error("Calendar conflict: time is unavailable." +
+      (alternatives.length ? " Suggested alternatives (Toronto): " + alternatives.join(", ") : " No nearby alternatives found."));
+  }
+}
+
+function createCalendarEvent_(job, calendar, period) {
+  calendar = calendar || getJobsCalendar_();
+  period = period || calendarPeriod_(job);
   var title = [job.serviceType || "Job", "-", job.customerName || job.jobId].join(" ");
   var description = [
+    "DWAP-Request-ID: " + job.requestId,
     "Job ID: " + (job.jobId || ""),
     "Request ID: " + (job.requestId || ""),
     "Customer: " + (job.customerName || ""),
@@ -663,26 +769,11 @@ function createCalendarEvent_(job) {
     "Quote: " + (job.quoteTotal || ""),
     "Balance Due: " + (job.balanceDue || ""),
     "Notes: " + (job.additionalNotes || ""),
-  ].join("\n");
-
-  var event = calendar.createEvent(title, start, end, {
+  ].join("\\n");
+  return calendar.createEvent(title, period.start, period.end, {
     description: description,
     location: job.pickupAddress || job.dropoffAddress || "",
   });
-
-  return event.getId();
-}
-
-function buildEventStart_(job) {
-  var datePart = job.preferredDate || formatDate_(new Date(), "yyyy-MM-dd");
-  var timePart = job.preferredTime || "09:00";
-  var candidate = buildCombinedDateTime_(datePart, timePart);
-
-  if (!candidate) {
-    throw new Error("Cannot create calendar event without a valid preferred date.");
-  }
-
-  return candidate;
 }
 
 function buildJobId_(job) {
