@@ -9,6 +9,7 @@ var CONFIG = {
     sendDeposit: "sendDeposit",
     confirmBooking: "confirmBooking",
     completeJob: "completeJob",
+    updateBooking: "updateBooking",
   },
 };
 
@@ -64,6 +65,7 @@ var CANONICAL_HEADERS = [
   "archiveOn",
   "riskFlags",
   "calendarEventId",
+  "balanceCollected",
 ];
 
 var HEADER_ALIASES = {
@@ -99,6 +101,7 @@ var HEADER_ALIASES = {
   archiveOn: ["archiveOn", "archive_on", "Archive On"],
   riskFlags: ["riskFlags", "risk_flags", "Risk Flags"],
   calendarEventId: ["calendarEventId", "calendar_event_id", "Calendar Event ID"],
+  balanceCollected: ["balanceCollected", "Balance Collected"],
 };
 
 function doGet(e) {
@@ -137,6 +140,10 @@ function handleRequest_(request) {
         ok: true,
         jobs: listJobs_(),
       });
+    }
+
+    if (action === CONFIG.actions.updateBooking) {
+      return jsonResponse_({ ok: true, job: updateBooking_(request.payload || {}) });
     }
 
     if (action === CONFIG.actions.sendDeposit) {
@@ -198,8 +205,51 @@ function listJobs_() {
   return merged.filter(shouldIncludeJob_).sort(compareJobs_);
 }
 
+function assertStatus_(job, statuses, action) {
+  if (statuses.indexOf(normalizeStatus_(job.status)) === -1) {
+    throw new Error("Cannot " + action + " from status " + job.status + ".");
+  }
+}
+
+function updateBooking_(payload) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var job = getExistingJobRecord_(payload);
+    assertStatus_(job, ["NEW", "DEPOSIT_SENT", "CONFIRMED", "DONE"], "edit booking");
+    var patch = {};
+    ["preferredDate", "preferredTime", "quoteTotal", "depositAmount", "operatorNotes", "actualDurationHours", "balanceCollected"].forEach(function(field) {
+      if (Object.prototype.hasOwnProperty.call(payload, field)) patch[field] = payload[field];
+    });
+    if (patch.quoteTotal !== undefined || patch.depositAmount !== undefined) {
+      var quote = patch.quoteTotal !== undefined ? patch.quoteTotal : job.quoteTotal;
+      var deposit = patch.depositAmount !== undefined ? patch.depositAmount : job.depositAmount;
+      if (quote !== null && deposit !== null && deposit > quote) throw new Error("Deposit cannot exceed quote.");
+      patch.balanceDue = quote === null || deposit === null ? null : Math.max(quote - deposit, 0);
+    }
+    if (patch.balanceCollected === true && normalizeStatus_(job.status) !== "DONE") {
+      throw new Error("Balance may only be marked collected when the job is complete.");
+    }
+    var updated = mergeObjects_(job, patch);
+    if (job.status === "CONFIRMED" && job.calendarEventId &&
+        (patch.preferredDate !== undefined || patch.preferredTime !== undefined)) {
+      var calendar = CalendarApp.getCalendarById(getConfig_().jobsCalendarId);
+      var event = calendar && calendar.getEventById(job.calendarEventId);
+      if (!event) throw new Error("Scheduled event not found. No changes saved.");
+      var start = buildEventStart_(updated);
+      var end = new Date(start.getTime() + (parseNumber_(updated.estimatedTimeHours) || 2) * 3600000);
+      event.setTime(start, end);
+    }
+    saveJobRecord_(updated);
+    return getExistingJobRecord_(payload);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function updateJobForDeposit_(payload) {
   var job = getExistingJobRecord_(payload);
+  assertStatus_(job, ["NEW"], "record deposit");
   var quoteTotal = parseNumber_(payload.quoteTotal);
   var depositAmount = parseNumber_(payload.depositAmount);
   var balanceDue = parseNumber_(payload.balanceDue);
@@ -223,10 +273,11 @@ function updateJobForDeposit_(payload) {
 
 function confirmBooking_(payload) {
   var job = getExistingJobRecord_(payload);
-  var wasConfirmed = normalizeStatus_(job.status) === CONFIG.statusConfirmed;
+  assertStatus_(job, ["DEPOSIT_SENT"], "confirm booking");
+  var wasConfirmed = false;
   var updated = mergeObjects_(job, {
     status: CONFIG.statusConfirmed,
-    depositPaid: payload.depositPaid === false ? false : true,
+    depositPaid: false,
     confirmedAt: job.confirmedAt || nowIso_(),
   });
 
@@ -240,6 +291,7 @@ function confirmBooking_(payload) {
 
 function completeJob_(payload) {
   var job = getExistingJobRecord_(payload);
+  assertStatus_(job, ["CONFIRMED"], "complete job");
   var completedAt = payload.completedAt || nowIso_();
   var archiveOn = payload.archiveOn || addDaysIso_(completedAt, CONFIG.doneRetentionDays);
   var actualDurationHours = parseNumber_(payload.actualDurationHours);
@@ -399,7 +451,8 @@ function normalizeField_(field, value) {
     field === "stairsInvolved" ||
     field === "elevatorAtPickup" ||
     field === "elevatorAtDropoff" ||
-    field === "depositPaid"
+    field === "depositPaid" ||
+    field === "balanceCollected"
   ) {
     return normalizeBoolean_(value);
   }
@@ -794,7 +847,7 @@ function mergeObjects_(base, override) {
       return;
     }
 
-    if (Object.prototype.hasOwnProperty.call(patch, field) && (field === "depositLink" || field === "operatorNotes")) {
+    if (Object.prototype.hasOwnProperty.call(patch, field) && (field === "depositLink" || field === "operatorNotes" || field === "balanceCollected" || field === "quoteTotal" || field === "depositAmount" || field === "actualDurationHours")) {
       merged[field] = patch[field];
       return;
     }
@@ -835,6 +888,7 @@ function validateDashboardPayload_(action, payload) {
     CONFIG.actions.sendDeposit,
     CONFIG.actions.confirmBooking,
     CONFIG.actions.completeJob,
+    CONFIG.actions.updateBooking,
   ];
   if (allowedActions.indexOf(action) === -1) {
     throw new Error("Unsupported action.");
@@ -843,6 +897,9 @@ function validateDashboardPayload_(action, payload) {
   var allowedFields = ["action", "token"];
   if (action !== CONFIG.actions.listJobs) {
     allowedFields.push("jobId", "requestId");
+    if (action === CONFIG.actions.updateBooking) {
+      allowedFields.push("preferredDate", "preferredTime", "quoteTotal", "depositAmount", "operatorNotes", "actualDurationHours", "balanceCollected");
+    }
     if (action === CONFIG.actions.sendDeposit) {
       allowedFields.push("quoteTotal", "depositAmount", "balanceDue", "depositLink");
     }
@@ -866,6 +923,17 @@ function validateDashboardPayload_(action, payload) {
     }
   });
 
+  if (action === CONFIG.actions.updateBooking) {
+    var date = payload.preferredDate;
+    if (date !== undefined && (typeof date !== "string" || !/^\\d{4}-\\d{2}-\\d{2}$/.test(date) || isNaN(new Date(date + "T12:00:00Z").getTime()) || new Date(date + "T12:00:00Z").toISOString().slice(0,10) !== date)) throw new Error("Invalid proposed date.");
+    if (payload.preferredTime !== undefined && (typeof payload.preferredTime !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(payload.preferredTime))) throw new Error("Invalid proposed time.");
+    if (payload.operatorNotes !== undefined && (typeof payload.operatorNotes !== "string" || payload.operatorNotes.length > 5000)) throw new Error("Invalid notes.");
+    if (payload.balanceCollected !== undefined && typeof payload.balanceCollected !== "boolean") throw new Error("Invalid balance state.");
+    ["quoteTotal", "depositAmount", "actualDurationHours"].forEach(function(field) {
+      var value = payload[field];
+      if (value !== undefined && value !== null && (typeof value !== "number" || !isFinite(value) || value < 0 || value > (field === "actualDurationHours" ? 1000 : 100000000))) throw new Error("Invalid " + field);
+    });
+  }
   if (action === CONFIG.actions.sendDeposit) {
     ["quoteTotal", "depositAmount", "balanceDue"].forEach(function(field) {
       var value = payload[field];
