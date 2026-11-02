@@ -10,6 +10,9 @@ The shared system design is documented in `docs/architecture.md`, `docs/data-con
 - Record quote, deposit amount, balance, and a payment link that was prepared outside this app.
 - Mark a booking confirmed and create a Jobs calendar event.
 - Mark a job done and hide completed jobs after 30 days.
+- Edit booking date/time, quote, deposit, operator notes, actual duration, and operator-verified balance collection.
+- Use customer phone and email links, confirm sensitive actions, and reject invalid lifecycle transitions.
+- Reload bookings after an edit and verify submitted values persisted.
 
 This version does not send customer email/text messages, create Square invoices, or verify payment. The quote button records details; it does not deliver a deposit link.
 
@@ -42,7 +45,7 @@ The source is `apps-script/Code.gs`. Create a **standalone Apps Script project**
 
 Set the Web App to execute as you, and make it callable by the Vercel gateway. The public HTTP entry point returns no customer data unless a valid token arrives in the POST JSON body. GET requests are rejected, and a token in the URL query string is not accepted. The Vercel gateway sends the token in the POST body and never returns it to the browser. Keep the script deployment URL and token out of browser code and Git.
 
-The gateway accepts only the `listJobs` read path and the `sendDeposit`, `confirmBooking`, and `completeJob` write actions. Write inputs are restricted to job/request IDs and action-specific fields. Amounts and durations must be bounded, finite, nonnegative numbers; payment links must be valid HTTPS URLs. Upstream Apps Script failures, timeouts, invalid responses, and missing configuration return sanitized errors without customer data or credentials.
+The gateway accepts only the `listJobs` read path and the `sendDeposit`, `confirmBooking`, `completeJob`, and `updateBooking` write actions. Write inputs are restricted to job/request IDs and action-specific fields. Amounts and durations must be bounded, finite, nonnegative numbers; payment links must be valid HTTPS URLs. Upstream Apps Script failures, timeouts, invalid responses, and missing configuration return sanitized errors without customer data or credentials.
 
 This is single-operator authentication: the app has one shared passphrase and no individual accounts, roles, or attribution for changes. It also has no durable cross-instance login rate limiter. Treat it as a portfolio/single-operator gateway; before relying on it for a wider public deployment, add an identity provider and durable abuse controls.
 
@@ -54,6 +57,6 @@ If an earlier token or passphrase was exposed, replace the Apps Script token pro
 
 ## Verification
 
-Run `npm install`, `npm test`, and `npm run build`. Use the full-stack deployment or `vercel dev` to check sign-in, sign-out, an unauthorized `/api/jobs` request, session expiration, job listing, invalid input rejection, and one synthetic test update. Use synthetic booking records for portfolio screenshots.
+Run `npm install`, `npm test`, and `npm run build`. See `docs/milestone-4-verification.md` for the new acceptance checks. This GitHub-only change has not been run against a deployed test Apps Script. Use the full-stack deployment or `vercel dev` to check sign-in, sign-out, an unauthorized `/api/jobs` request, session expiration, job listing, invalid input rejection, and one synthetic test update. Use synthetic booking records for portfolio screenshots.
 
 Append `?demo=1` to the dashboard URL for a public portfolio view containing only synthetic records. Demo mode bypasses sign-in, does not call the jobs API, and disables write controls. The default route remains live mode and uses only authenticated backend data.
