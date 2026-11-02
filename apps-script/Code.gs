@@ -230,6 +230,7 @@ function updateBooking_(payload) {
     if (patch.balanceCollected === true && normalizeStatus_(job.status) !== "DONE") {
       throw new Error("Balance may only be marked collected when the job is complete.");
     }
+    if (normalizeStatus_(job.status) === "DONE" && (patch.preferredDate !== undefined || patch.preferredTime !== undefined)) throw new Error("Cannot reschedule a completed job.");
     var updated = mergeObjects_(job, patch);
     if (job.status === "CONFIRMED" && job.calendarEventId &&
         (patch.preferredDate !== undefined || patch.preferredTime !== undefined)) {
@@ -252,6 +253,7 @@ function updateJobForDeposit_(payload) {
   assertStatus_(job, ["NEW"], "record deposit");
   var quoteTotal = parseNumber_(payload.quoteTotal);
   var depositAmount = parseNumber_(payload.depositAmount);
+  if (depositAmount > quoteTotal) throw new Error("Deposit cannot exceed quote.");
   var balanceDue = parseNumber_(payload.balanceDue);
 
   if (balanceDue === null && quoteTotal !== null && depositAmount !== null) {
@@ -303,6 +305,7 @@ function completeJob_(payload) {
     actualDurationHours = parseNumber_(job.estimatedTimeHours);
   }
 
+  if (actualDurationHours === null) throw new Error("Record actual job duration before completion.");
   var updated = mergeObjects_(job, {
     status: CONFIG.statusDone,
     completedAt: completedAt,
@@ -329,8 +332,9 @@ function getExistingJobRecord_(payload) {
 
 function matchesPayload_(job, payload) {
   return Boolean(
-    (payload.jobId && job.jobId === payload.jobId) ||
-    (payload.requestId && job.requestId === payload.requestId)
+    (payload.jobId && payload.requestId && job.jobId === payload.jobId && job.requestId === payload.requestId) ||
+    (!payload.requestId && payload.jobId && job.jobId === payload.jobId) ||
+    (!payload.jobId && payload.requestId && job.requestId === payload.requestId)
   );
 }
 
