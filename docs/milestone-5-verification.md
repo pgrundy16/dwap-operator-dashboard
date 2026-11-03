@@ -7,7 +7,7 @@
 - Do not merge until the real integration checklist passes.
 
 ## Implemented
-- Booking intake `Sheet1`'s calendar event ID is mapped to `bookingCalendarEventId`, separately from the `Jobs` calendar's `calendarEventId`. Verify the booking intake header in the deployed workbook.
+- Booking intake `Sheet1`'s calendar event ID is mapped to `leadCalendarEventId`, separately from the `Jobs` calendar's `calendarEventId`. The physical source header currently says `Booking Calendar Event ID`, although this event is created on the lead calendar.
 - Confirmation uses Apps Script's script-level lock, and safely reuses the stored Jobs calendar event ID.
 - When a calendar event was created but the sheet save failed, retries search for the exact `DWAP-Request-ID` marker in Jobs event descriptions to recover the event rather than creating another. A duplicate marker causes a manual reconciliation error.
 - Reject confirmation when the requested slot is occupied; propose up to three later free 30-minute candidates within the next 12 hours. These are calendar-free alternatives only—not automatically approved customer or crew times.
@@ -21,7 +21,7 @@
 1. Fetch the branch: `git fetch origin && git switch feat/milestone-5-calendar-synchronization`.
 2. Run `npm test` and `npm run build`. Fix any failures before merge.
 3. Deploy this branch's `apps-script/Code.gs` to a **test** standalone Apps Script deployment and configure `DASHBOARD_SPREADSHEET_ID`, `JOBS_CALENDAR_ID`, and `DASHBOARD_API_TOKEN` with synthetic/test resources. Deploy the Vercel backend pointing at that test endpoint.
-4. Confirm booking intake `Sheet1` maps the actual source calendar ID into `bookingCalendarEventId`. If the intake calls this field something other than `Calendar Event ID`, add its explicit header alias before live use. Ensure it is not incorrectly used as a Jobs event ID.
+4. Confirm booking intake `Sheet1` maps the source event ID into `leadCalendarEventId` (currently physical header `Booking Calendar Event ID`). Ensure it is never treated as a Jobs event ID.
 5. Create a synthetic DEPOSIT_SENT booking. Confirm it and verify exactly one Jobs event appears; verify `Jobs.calendarEventId` matches the actual Jobs calendar event and survives refresh.
 6. Confirm again and repeat an identical API request. Verify one event and the same persisted ID. Test a simulated Sheet save failure after event creation and retry; verify recovery without another event.
 7. Create a competing event in the test Jobs calendar during the desired period. Confirm a second synthetic booking for that slot. Expect an actionable conflict and suggestions; verify no new Jobs event or confirmed status.
@@ -38,5 +38,5 @@
 - Suggested alternatives are only nearby free time slots; business hours, routing, crew assignments and customer acceptance are not assessed.
 - Event recovery searches a 14-day window around the scheduled slot. Missing IDs or moved events outside this window require manual reconciliation.
 - CalendarApp and Sheets are not one transaction. Recovery and rollback reduce duplicate/out-of-sync cases but cannot guarantee atomicity across services.
-- Do not assume modifying the Jobs event also moves or deletes the intake booking-calendar event; that is intentionally a separate record.
-- The source code was updated through GitHub. **Live Google Calendar and Google Sheets verification has not been performed here.**
+- The desired business flow moves the intake event from lead to booking calendar after dashboard confirmation. Current code creates a distinct Jobs event and does not remove/move the lead event; this is a known implementation gap and must be resolved before operational use.
+- **Local synthetic mocks only:** Google Calendar and Google Sheets were not reachable from this development session, so live integration has not been verified.

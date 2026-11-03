@@ -16,7 +16,7 @@ flowchart LR
   Operator[Operator dashboard browser] -->|signed session| API[Vercel dashboard API]
   API -->|server token| Script
   Script -->|operator updates| Jobs[Booking workbook: Jobs tab]
-  Script -->|on confirmation: transfer once| BookingCalendar[Test service booking calendar]
+  Script -->|on confirmation: create separate Jobs event| BookingCalendar[Test service booking calendar]
   Intake -->|date, Request ID, project| TicketScript[Time Ticket Apps Script]
   Employee[Employee Time Ticket browser] -->|time entries| TicketAPI[Separate Vercel ticket API]
   TicketAPI --> TicketScript
@@ -35,7 +35,7 @@ The website creates booking requests. `Sheet1` owns intake data and the immutabl
 | Quote, deposit metadata, status, operator notes, display Job ID | `Jobs` tab | Dashboard Apps Script merges `Jobs` over `Sheet1` by Request ID |
 | Payment link, invoice, deposit/balance payment truth | Square | Manual operator action; no Square API or webhook in this dashboard |
 | Intake event | Test service lead calendar | Booking Apps Script creates an event after appending the request row; verified with a synthetic test booking |
-| Confirmed job event | Test service booking calendar | Target: dashboard confirmation transfers the event from lead to booking calendar. Current dashboard source creates a new event but does not remove or move the intake event; a test dashboard deployment is not present to verify the target behavior. |
+| Confirmed job event | Test service booking calendar | Dashboard source creates a distinct event and stores its ID in `Jobs.calendarEventId`; it currently leaves the lead-calendar intake event in place. Live dashboard integration is not deployed or verified. |
 | Employee job time and submission | `Time Ticket Log` | Separate Time Ticket Apps Script; employee identity is **not yet verified** by that API |
 | Payroll allocation hours | Pay-period tracker in labour workbook | Time Ticket script writes rounded hours by job key and employee column |
 
