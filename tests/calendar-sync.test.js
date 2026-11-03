@@ -3,92 +3,301 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-function harness() {
-  const events = [];
-  let serial = 0;
-  let record = { jobId: "JOB-100", requestId: "REQ-100", status: "DEPOSIT_SENT", preferredDate: "2026-11-05", preferredTime: "10:00", estimatedTimeHours: 2, customerName: "Test Customer", serviceType: "Move", calendarEventId: "", depositPaid: false };
-  let failSave = false;
-  const calendar = {
-    getEventById(id) { return events.find(e => e.getId() === id) || null; },
-    getEvents(start, end) { return events.filter(e => e.getStartTime() < end && e.getEndTime() > start); },
-    createEvent(title, start, end, options) {
-      const id = "event-" + (++serial);
-      const event = { getId: () => id, getStartTime: () => start, getEndTime: () => end,
-        getDescription: () => options.description,
-        setTime(a, b) { start = a; end = b; } };
-      events.push(event); return event;
+const source = readFileSync(new URL("../apps-script/Code.gs", import.meta.url), "utf8");
+
+function makeUtilities() {
+  return {
+    formatDate(date, timezone, pattern) {
+      if (pattern === "Z") {
+        const offset = new Intl.DateTimeFormat("en-US", { timeZone: timezone, timeZoneName: "longOffset" })
+          .formatToParts(date).find((part) => part.type === "timeZoneName").value;
+        return offset.replace("GMT", "").replace(":", "") || "+0000";
+      }
+      const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+        timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+      }).formatToParts(date).map(({ type, value }) => [type, value]));
+      if (pattern === "yyyy-MM-dd HH:mm") return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+      if (pattern === "yyyy-MM-dd") return `${parts.year}-${parts.month}-${parts.day}`;
+      return "";
     },
+    getUuid: () => "synthetic-uuid",
   };
-  const context = {
-    Date, JSON, Object, Array, Math, String, Number, Boolean, RegExp, Error,
-    CalendarApp: { getCalendarById: () => calendar },
-    LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
-    Utilities: {
-      parseDate(value) { return new Date(value.replace(" ", "T") + ":00-05:00"); },
-      formatDate(date) {
-        const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/Toronto",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23" }).formatToParts(date).filter(p => p.type !== "literal").map(p => [p.type,p.value]));
-        return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
-      },
-    },
-  };
-  vm.createContext(context);
-  vm.runInContext(readFileSync(new URL("../apps-script/Code.gs", import.meta.url), "utf8"), context);
-  context.getConfig_ = () => ({ jobsCalendarId: "test-calendar" });
-  context.getExistingJobRecord_ = () => ({ ...record });
-  context.saveJobRecord_ = value => { if (failSave) throw new Error("Simulated sheet failure"); record = { ...value }; };
-  return { context, events, calendar, getRecord: () => record, setRecord: value => { record = value; }, failNextSave: () => { failSave = true; } };
 }
 
-test("confirmation creates one event, persists ID and remains idempotent", () => {
+function harness(options = {}) {
+  const events = [];
+  let serial = 0;
+  let record = {
+    jobId: "JOB-100", requestId: "REQ-100", status: options.status || "DEPOSIT_SENT",
+    preferredDate: "2026-11-05", preferredTime: "10:00", estimatedTimeHours: 2,
+    customerName: "Sample Customer", serviceType: "Move", pickupAddress: "100 Test St",
+    dropoffAddress: "200 Test Ave", phone: "5550101000", email: "sample@example.com",
+    quoteTotal: 500, depositAmount: 100, balanceDue: 400, depositLink: "",
+    operatorNotes: "", calendarEventId: "", leadCalendarEventId: "lead-event-1",
+    balanceCollected: false, actualDurationHours: null, depositPaid: false,
+  };
+  let saveFailureCount = 0;
+  let silentSaveFailureCount = 0;
+  let failCalendarLookup = false;
+  let failCreateCount = 0;
+  let setTimeFailureCount = 0;
+  let failRollbackMetadata = false;
+  let locksAcquired = 0;
+  const calendar = {
+    getEventById(id) { return events.find((event) => event.getId() === id) || null; },
+    getEvents(start, end) { return events.filter((event) => event.getStartTime() < end && event.getEndTime() > start); },
+    createEvent(title, start, end, options = {}) {
+      if (failCreateCount > 0) { failCreateCount -= 1; throw new Error("calendar create unavailable"); }
+      const id = `event-${++serial}`;
+      const state = { id, title, start, end, description: options.description || "", location: options.location || "" };
+      const event = {
+        getId: () => state.id,
+        getTitle: () => state.title,
+        getStartTime: () => state.start,
+        getEndTime: () => state.end,
+        getDescription: () => state.description,
+        getLocation: () => state.location,
+        setTime(a, b) {
+          if (setTimeFailureCount > 0) { setTimeFailureCount -= 1; throw new Error("calendar setTime unavailable"); }
+          state.start = a; state.end = b;
+        },
+        setTitle(value) { state.title = value; },
+        setDescription(value) {
+          if (failRollbackMetadata && state.description.includes("Draft changed")) throw new Error("rollback description failed");
+          state.description = value;
+        },
+        setLocation(value) { state.location = value; },
+      };
+      events.push(event);
+      return event;
+    },
+  };
+
+  const context = {
+    Date, JSON, Object, Array, Math, String, Number, Boolean, RegExp, Error,
+    CalendarApp: { getCalendarById: () => failCalendarLookup ? null : calendar },
+    LockService: { getScriptLock: () => ({ waitLock(ms) { assert.equal(ms, 20000); locksAcquired += 1; }, releaseLock() {} }) },
+    Utilities: makeUtilities(),
+  };
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  context.getConfig_ = () => ({ jobsCalendarId: options.missingCalendarId ? "" : "test-calendar" });
+  context.getExistingJobRecord_ = (payload = {}) => {
+    const matches = (!payload.requestId || payload.requestId === record.requestId) &&
+      (!payload.jobId || payload.jobId === record.jobId);
+    if (!matches || (!payload.jobId && !payload.requestId)) throw new Error("Job not found for request.");
+    return { ...record };
+  };
+  context.saveJobRecord_ = (value) => {
+    if (saveFailureCount > 0) { saveFailureCount -= 1; throw new Error("Simulated Sheet failure"); }
+    if (silentSaveFailureCount > 0) { silentSaveFailureCount -= 1; return; }
+    record = { ...value };
+  };
+
+  return {
+    context, events, calendar,
+    getRecord: () => ({ ...record }),
+    setRecord: (value) => { record = { ...value }; },
+    failNextSave: () => { saveFailureCount += 1; },
+    silentlyFailNextSave: () => { silentSaveFailureCount += 1; },
+    failCalendarLookup: () => { failCalendarLookup = true; },
+    failNextCreate: () => { failCreateCount += 1; },
+    failSetTimeCalls: (count) => { setTimeFailureCount = count; },
+    failRollbackMetadata: () => { failRollbackMetadata = true; },
+    lockCount: () => locksAcquired,
+  };
+}
+
+const key = { jobId: "JOB-100", requestId: "REQ-100" };
+
+test("confirmation creates a Toronto-timed Jobs event, persists its ID, and is idempotent", () => {
   const h = harness();
-  const first = h.context.confirmBooking_({ requestId: "REQ-100" });
-  const second = h.context.confirmBooking_({ requestId: "REQ-100" });
+  const first = h.context.confirmBooking_(key);
+  const second = h.context.confirmBooking_(key);
   assert.equal(h.events.length, 1);
   assert.equal(first.calendarEventId, second.calendarEventId);
   assert.equal(h.getRecord().status, "CONFIRMED");
+  assert.match(h.events[0].getDescription(), /DWAP-Request-ID: REQ-100/);
+  assert.equal(h.events[0].getStartTime().toISOString(), "2026-11-05T15:00:00.000Z");
+  assert.equal(h.events[0].getEndTime().toISOString(), "2026-11-05T17:00:00.000Z");
+  assert.equal(h.lockCount(), 2);
 });
 
-test("lost Sheet write is recovered using the exact Request ID marker", () => {
-  const h = harness();
-  h.failNextSave();
-  assert.throws(() => h.context.confirmBooking_({ requestId: "REQ-100" }), /Simulated sheet/);
-  assert.equal(h.events.length, 1);
-  // Simulate the next request after the failed write with the prior data intact.
-  h.context.saveJobRecord_ = value => h.setRecord(value);
-  const result = h.context.confirmBooking_({ requestId: "REQ-100" });
-  assert.equal(result.calendarEventId, "event-1");
-  assert.equal(h.events.length, 1);
+test("confirmation recovers an event after a failed or silently lost Sheet write", () => {
+  for (const silent of [false, true]) {
+    const h = harness();
+    if (silent) h.silentlyFailNextSave(); else h.failNextSave();
+    assert.throws(() => h.context.confirmBooking_(key), /Sheet failure|event ID did not persist/);
+    assert.equal(h.events.length, 1);
+    const retry = h.context.confirmBooking_(key);
+    assert.equal(retry.calendarEventId, "event-1");
+    assert.equal(h.events.length, 1);
+  }
 });
 
-test("conflicting time refuses confirmation and offers alternatives", () => {
+test("confirmation blocks conflicting events and suggests only free candidates", () => {
   const h = harness();
-  h.calendar.createEvent("unrelated", new Date("2026-11-05T15:00:00Z"), new Date("2026-11-05T17:00:00Z"), { description: "unrelated" });
-  assert.throws(() => h.context.confirmBooking_({ requestId: "REQ-100" }), /Calendar conflict.*Suggested alternatives/);
+  h.calendar.createEvent("busy", new Date("2026-11-05T15:00:00Z"), new Date("2026-11-05T17:00:00Z"), { description: "busy" });
+  assert.throws(() => h.context.confirmBooking_(key), (error) => {
+    assert.match(error.message, /Calendar conflict/);
+    const alternatives = error.message.match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/g) || [];
+    assert.ok(alternatives.length > 0 && alternatives.length <= 3);
+    for (const alternative of alternatives) {
+      const [date, time] = alternative.split(" ");
+      const start = h.context.parseTorontoLocalDateTime_(date, time);
+      const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+      assert.equal(h.calendar.getEvents(start, end).length, 0);
+    }
+    return true;
+  });
   assert.equal(h.getRecord().status, "DEPOSIT_SENT");
   assert.equal(h.events.length, 1);
 });
 
-test("rescheduling edits existing event without creating another", () => {
+test("calendar conflict produces no suggestions when the nearby window is fully occupied", () => {
   const h = harness();
-  h.context.confirmBooking_({ requestId: "REQ-100" });
-  const result = h.context.updateBooking_({ preferredDate: "2026-11-05", preferredTime: "13:00" });
-  assert.equal(result.preferredTime, "13:00");
+  h.calendar.createEvent("all busy", new Date("2026-11-05T15:00:00Z"), new Date("2026-11-06T06:00:00Z"), { description: "busy" });
+  assert.throws(() => h.context.confirmBooking_(key), /No nearby alternatives found/);
+  assert.equal(h.events.length, 1);
+  assert.equal(h.getRecord().status, "DEPOSIT_SENT");
+});
+
+test("missing or foreign event IDs and duplicate request markers fail closed", () => {
+  const wrong = harness();
+  wrong.setRecord({ ...wrong.getRecord(), calendarEventId: "foreign" });
+  wrong.calendar.createEvent("foreign", new Date("2026-11-05T15:00:00Z"), new Date("2026-11-05T17:00:00Z"), { description: "DWAP-Request-ID: OTHER-REQUEST" });
+  wrong.setRecord({ ...wrong.getRecord(), calendarEventId: "event-1" });
+  assert.throws(() => wrong.context.confirmBooking_(key), /does not match this Request ID/);
+
+  const missing = harness();
+  missing.setRecord({ ...missing.getRecord(), calendarEventId: "deleted-event" });
+  assert.throws(() => missing.context.confirmBooking_(key), /event is missing/);
+
+  const duplicate = harness();
+  for (let i = 0; i < 2; i += 1) {
+    duplicate.calendar.createEvent(`duplicate ${i}`, new Date(`2026-11-05T1${5 + i}:00:00Z`), new Date(`2026-11-05T1${6 + i}:00:00Z`), { description: "DWAP-Request-ID: REQ-100" });
+  }
+  assert.throws(() => duplicate.context.confirmBooking_(key), /duplicate events for this Request ID/);
+});
+
+test("calendar creation failure does not mark the booking confirmed", () => {
+  const h = harness();
+  h.failNextCreate();
+  assert.throws(() => h.context.confirmBooking_(key), /calendar create unavailable/);
+  assert.equal(h.getRecord().status, "DEPOSIT_SENT");
+  assert.equal(h.getRecord().calendarEventId, "");
+  assert.equal(h.events.length, 0);
+});
+
+test("stored intake and Jobs event IDs remain separate in canonical mappings", () => {
+  const h = harness();
+  assert.equal(h.context.findCanonicalField_("Booking Calendar Event ID"), "leadCalendarEventId");
+  assert.equal(h.context.findCanonicalField_("Jobs Calendar Event ID"), "calendarEventId");
+  assert.notEqual(h.context.HEADER_ALIASES.leadCalendarEventId, h.context.HEADER_ALIASES.calendarEventId);
+});
+
+test("rescheduling changes the existing event and keeps its ID", () => {
+  const h = harness();
+  const confirmed = h.context.confirmBooking_(key);
+  const updated = h.context.updateBooking_({ ...key, preferredTime: "13:00" });
+  assert.equal(updated.preferredTime, "13:00");
+  assert.equal(updated.calendarEventId, confirmed.calendarEventId);
   assert.equal(h.events.length, 1);
   assert.equal(h.events[0].getStartTime().toISOString(), "2026-11-05T18:00:00.000Z");
 });
 
-test("rescheduling conflict preserves Sheet and prior calendar time", () => {
+test("date-only rescheduling works and completed jobs cannot be rescheduled", () => {
   const h = harness();
-  h.context.confirmBooking_({ requestId: "REQ-100" });
+  h.context.confirmBooking_(key);
+  const dateChange = h.context.updateBooking_({ ...key, preferredDate: "2026-11-06" });
+  assert.equal(dateChange.preferredDate, "2026-11-06");
+  assert.equal(h.events.length, 1);
+  h.setRecord({ ...h.getRecord(), status: "DONE" });
+  assert.throws(() => h.context.updateBooking_({ ...key, preferredDate: "2026-11-07" }), /Cannot reschedule a completed job/);
+});
+
+test("reschedule conflict preserves Sheet and existing event", () => {
+  const h = harness();
+  h.context.confirmBooking_(key);
   h.calendar.createEvent("busy", new Date("2026-11-05T18:00:00Z"), new Date("2026-11-05T19:00:00Z"), { description: "busy" });
-  assert.throws(() => h.context.updateBooking_({ preferredTime: "13:00" }), /Calendar conflict/);
+  assert.throws(() => h.context.updateBooking_({ ...key, preferredTime: "13:00" }), /Calendar conflict/);
+  assert.equal(h.getRecord().preferredTime, "10:00");
+  assert.equal(h.events[0].getStartTime().toISOString(), "2026-11-05T15:00:00.000Z");
+  assert.equal(h.events.length, 2);
+});
+
+test("failed Sheet write after rescheduling rolls calendar back; failed rollback is explicit", () => {
+  const h = harness();
+  h.context.confirmBooking_(key);
+  h.failNextSave();
+  assert.throws(() => h.context.updateBooking_({ ...key, preferredTime: "13:00" }), /Simulated Sheet failure/);
+  assert.equal(h.getRecord().preferredTime, "10:00");
+  assert.equal(h.events[0].getStartTime().toISOString(), "2026-11-05T15:00:00.000Z");
+
+  const rollback = harness();
+  rollback.context.confirmBooking_(key);
+  rollback.failNextSave();
+  rollback.failSetTimeCalls(2);
+  assert.throws(() => rollback.context.updateBooking_({ ...key, preferredTime: "13:00" }), /calendar rollback failed; manual reconciliation required/);
+  assert.equal(rollback.getRecord().preferredTime, "10:00");
+});
+
+test("confirmed booking edits refresh event notes and financial details transactionally", () => {
+  const h = harness();
+  h.context.confirmBooking_(key);
+  const eventId = h.getRecord().calendarEventId;
+  const updated = h.context.updateBooking_({ ...key, quoteTotal: 600, depositAmount: 150, operatorNotes: "Draft changed" });
+  assert.equal(updated.balanceDue, 450);
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0].getId(), eventId);
+  assert.match(h.events[0].getDescription(), /Quote: 600/);
+  assert.match(h.events[0].getDescription(), /Balance Due: 450/);
+  assert.match(h.events[0].getDescription(), /Operator Notes: Draft changed/);
+
+  h.failNextSave();
+  assert.throws(() => h.context.updateBooking_({ ...key, operatorNotes: "Another draft" }), /Simulated Sheet failure/);
+  assert.equal(h.getRecord().operatorNotes, "Draft changed");
+  assert.match(h.events[0].getDescription(), /Operator Notes: Draft changed/);
+});
+
+test("silent reschedule persistence failure is detected and rolled back", () => {
+  const h = harness();
+  h.context.confirmBooking_(key);
+  h.silentlyFailNextSave();
+  assert.throws(() => h.context.updateBooking_({ ...key, preferredTime: "13:00" }), /Saved booking values could not be verified/);
   assert.equal(h.getRecord().preferredTime, "10:00");
   assert.equal(h.events[0].getStartTime().toISOString(), "2026-11-05T15:00:00.000Z");
 });
 
-test("a stored missing event ID fails closed rather than creating a duplicate", () => {
+test("Toronto spring DST gap, fall repeated hour, invalid dates and durations are rejected", () => {
   const h = harness();
-  h.setRecord({ ...h.getRecord(), calendarEventId: "missing" });
-  assert.throws(() => h.context.confirmBooking_({ requestId: "REQ-100" }), /Reconcile manually/);
-  assert.equal(h.events.length, 0);
+  assert.throws(() => h.context.parseTorontoLocalDateTime_("2026-03-08", "02:30"), /does not exist/);
+  assert.throws(() => h.context.parseTorontoLocalDateTime_("2026-11-01", "01:30"), /ambiguous/);
+  assert.throws(() => h.context.parseTorontoLocalDateTime_("2026-02-30", "10:00"), /real calendar date/);
+  assert.throws(() => h.context.calendarPeriod_({ ...h.getRecord(), preferredTime: "25:00" }), /valid proposed date and time/);
+  assert.throws(() => h.context.calendarPeriod_({ ...h.getRecord(), estimatedTimeHours: 0 }), /valid estimated duration/);
+  assert.throws(() => h.context.calendarPeriod_({ ...h.getRecord(), estimatedTimeHours: 25 }), /valid estimated duration/);
+});
+
+test("missing calendar configuration, denied access, and create failures are actionable", () => {
+  const config = harness({ missingCalendarId: true });
+  assert.throws(() => config.context.confirmBooking_(key), /Calendar synchronization is not configured/);
+  const denied = harness();
+  denied.failCalendarLookup();
+  assert.throws(() => denied.context.confirmBooking_(key), /not found or access was denied/);
+});
+
+test("lifecycle transitions require valid source states and actual duration", () => {
+  const fresh = harness({ status: "NEW" });
+  const deposit = fresh.context.updateJobForDeposit_({ ...key, quoteTotal: 500, depositAmount: 100, balanceDue: 400 });
+  assert.equal(deposit.status, "DEPOSIT_SENT");
+  assert.throws(() => fresh.context.updateJobForDeposit_({ ...key, quoteTotal: 500, depositAmount: 100, balanceDue: 400 }), /Cannot record deposit from status DEPOSIT_SENT/);
+
+  const beforeActual = harness({ status: "CONFIRMED" });
+  assert.throws(() => beforeActual.context.completeJob_(key), /Explicit actual duration required/);
+  const completed = beforeActual.context.completeJob_({ ...key, actualDurationHours: 3.5 });
+  assert.equal(completed.status, "DONE");
+  assert.equal(completed.actualDurationHours, 3.5);
+  assert.throws(() => beforeActual.context.completeJob_({ ...key, actualDurationHours: 3.5 }), /Cannot complete job from status DONE/);
 });

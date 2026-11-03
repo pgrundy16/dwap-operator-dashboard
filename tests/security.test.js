@@ -3,7 +3,9 @@ import { after, before, test } from "node:test";
 import sessionHandler from "../api/session.js";
 import jobsHandler from "../api/jobs.js";
 import { fetchJobs } from "../src/lib/api.js";
-import { formatDate, formatDateTime, formatJobTime } from "../src/lib/formatters.js";
+import { formatCurrency, formatDate, formatDateTime, formatJobTime } from "../src/lib/formatters.js";
+import { emailHref, phoneHref } from "../src/lib/contactLinks.js";
+import { calculateJobMetrics } from "../src/lib/jobMetrics.js";
 
 const oldEnv = {
   DASHBOARD_PASSPHRASE: process.env.DASHBOARD_PASSPHRASE,
@@ -141,6 +143,8 @@ test("job writes reject invalid fields before calling Apps Script", async () => 
     { action: "sendDeposit", jobId: "TEST-1", quoteTotal: 10, depositAmount: 2, balanceDue: 8, depositLink: "javascript:alert(1)" },
     { action: "sendDeposit", jobId: "TEST-1", quoteTotal: 100_000_001, depositAmount: 2, balanceDue: 8 },
     { action: "sendDeposit", jobId: "TEST-1", quoteTotal: 10, depositAmount: 2, balanceDue: 8, depositLink: "https://user:password@square.example/pay" },
+    { action: "sendDeposit", jobId: "TEST-1", quoteTotal: 10, depositAmount: 2, balanceDue: 5 },
+    { action: "sendDeposit", jobId: "TEST-1", quoteTotal: 10, depositAmount: 12, balanceDue: 0 },
     { action: "completeJob", requestId: "request-1", actualDurationHours: Infinity },
     { action: "confirmBooking", jobId: "\n" },
   ];
@@ -152,6 +156,42 @@ test("job writes reject invalid fields before calling Apps Script", async () => 
     assert.equal(res.body.ok, false);
   }
   assert.equal(fetchCalls, 0);
+});
+
+test("booking updates validate dates, times, amounts, notes and balance state at the gateway", async () => {
+  const login = response();
+  sessionHandler({ method: "POST", headers: sameOriginHeaders, body: { passphrase: process.env.DASHBOARD_PASSPHRASE } }, login);
+  const cookie = login.headers["set-cookie"].split(";")[0];
+  let fetchCalls = 0;
+  globalThis.fetch = async (_url, options) => {
+    fetchCalls += 1;
+    return { ok: true, json: async () => ({ ok: true, job: JSON.parse(options.body) }) };
+  };
+  const invalid = [
+    { preferredDate: "" },
+    { preferredDate: "2026-02-30" },
+    { preferredTime: "25:00" },
+    { preferredTime: "9:30" },
+    { quoteTotal: -1 },
+    { actualDurationHours: 1001 },
+    { operatorNotes: "bad\u0001note" },
+    { balanceCollected: "yes" },
+    {},
+  ];
+  for (const patch of invalid) {
+    const res = response();
+    await jobsHandler({ method: "POST", headers: { ...sameOriginHeaders, cookie }, body: { action: "updateBooking", requestId: "REQ-1", ...patch } }, res);
+    assert.equal(res.code, 400, JSON.stringify(patch));
+  }
+  assert.equal(fetchCalls, 0);
+  const valid = response();
+  await jobsHandler({ method: "POST", headers: { ...sameOriginHeaders, cookie }, body: {
+    action: "updateBooking", requestId: "REQ-1", preferredDate: "2026-11-12", preferredTime: "09:30",
+    quoteTotal: 550, depositAmount: 125, operatorNotes: "Leave side gate clear", actualDurationHours: 2.5,
+    balanceCollected: false,
+  } }, valid);
+  assert.equal(valid.code, 200);
+  assert.equal(fetchCalls, 1);
 });
 
 test("job gateway rejects oversized write bodies", async () => {
@@ -226,6 +266,26 @@ test("gateway treats malformed upstream jobs as an upstream failure", async () =
   assert.equal(res.body.ok, false);
 });
 
+test("gateway exposes actionable calendar rollback errors but masks private upstream failures", async () => {
+  const login = response();
+  sessionHandler({ method: "POST", headers: sameOriginHeaders, body: { passphrase: process.env.DASHBOARD_PASSPHRASE } }, login);
+  const cookie = login.headers["set-cookie"].split(";")[0];
+  const invoke = async (error) => {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: false, error }) });
+    const res = response();
+    await jobsHandler({ method: "POST", headers: { ...sameOriginHeaders, cookie }, body: { action: "updateBooking", requestId: "REQ-1", operatorNotes: "safe" } }, res);
+    return res;
+  };
+
+  const reconciliation = await invoke("Calendar or Sheet update failed and calendar rollback failed; manual reconciliation required.");
+  assert.equal(reconciliation.code, 409);
+  assert.match(reconciliation.body.error, /manual reconciliation required/);
+
+  const privateFailure = await invoke("Exception: private customer row and secret token");
+  assert.equal(privateFailure.code, 502);
+  assert.doesNotMatch(privateFailure.body.error, /customer row|secret token/);
+});
+
 test("browser job client keeps valid jobs and counts malformed or duplicate records", async () => {
   globalThis.fetch = async () => ({
     ok: true,
@@ -246,4 +306,32 @@ test("job dates and timestamps display in America/Toronto", () => {
   assert.match(formatDate("2026-11-12"), /Thu, Nov 12/);
   assert.match(formatJobTime("2026-11-12", "09:00"), /9:00/);
   assert.match(formatDateTime("2026-11-12T14:00:00Z"), /9:00/);
+});
+
+test("customer contact actions produce safe mobile tel and mailto links", () => {
+  assert.equal(phoneHref("+1 (514) 555-0100"), "tel:+15145550100");
+  assert.equal(phoneHref("514-555-0100"), "tel:5145550100");
+  assert.equal(phoneHref(""), null);
+  assert.equal(phoneHref("abc@example.com"), null);
+  assert.equal(phoneHref("123"), null);
+  assert.equal(emailHref("sample@example.com"), "mailto:sample@example.com");
+  assert.equal(emailHref("bad email@example.com"), null);
+  assert.equal(emailHref("user@example.com?subject=leak"), null);
+  assert.equal(emailHref(""), null);
+});
+
+test("dashboard metrics account for operator-marked balance collection and Toronto date", () => {
+  const jobs = [
+    { status: "NEW", balanceDue: 20, quoteTotal: 30 },
+    { status: "CONFIRMED", preferredDate: "2026-11-02", balanceDue: 100, quoteTotal: 200 },
+    { status: "DONE", balanceDue: 50, balanceCollected: true, quoteTotal: 300 },
+    { status: "DONE", balanceDue: 40, balanceCollected: false, quoteTotal: 400 },
+  ];
+  const metrics = calculateJobMetrics(jobs, new Date("2026-11-03T02:00:00Z"));
+  assert.deepEqual(metrics, { pending: 1, confirmedToday: 1, balanceOpen: 140, revenueCompleted: 700 });
+});
+
+test("CAD display keeps cents when present", () => {
+  assert.match(formatCurrency(1234.56), /1,234\.56/);
+  assert.match(formatCurrency(1200), /1,200/);
 });
