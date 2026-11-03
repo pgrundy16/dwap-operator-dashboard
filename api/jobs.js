@@ -210,7 +210,7 @@ export default async function handler(req, res) {
       const message = typeof data?.error === "string" ? data.error : "";
       // Only return explicitly classified calendar errors; never echo arbitrary
       // upstream exceptions that might reveal spreadsheet or customer details.
-      const calendarError = /^(?:Calendar (?:conflict:|requires |time is |event |has |synchronization )|Calendar for Jobs |Scheduled event |No calendar event |Cannot reschedule |Calendar updated but |Calendar or Sheet update failed)/.test(message)
+      const calendarError = /^(?:Calendar (?:conflict:|requires |time is |event |has |synchronization )|Calendar for Jobs |Lead calendar |Lead event |Jobs event is saved|Jobs calendar event |Scheduled event |No calendar event |Cannot reschedule |Calendar updated but |Calendar or Sheet update failed)/.test(message)
         && message.length <= 450 ? message : null;
       const lifecycleError = /^Cannot (?:record deposit|confirm booking|complete job|edit booking) from status [A-Z_]+\.$/.test(message) ? message : null;
       const notFoundError = message === "Job not found for request." ? message : null;

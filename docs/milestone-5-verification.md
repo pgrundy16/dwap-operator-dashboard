@@ -20,7 +20,7 @@
 ## Local verification on Mac
 1. Fetch the branch: `git fetch origin && git switch feat/milestone-5-calendar-synchronization`.
 2. Run `npm test` and `npm run build`. Fix any failures before merge.
-3. Deploy this branch's `apps-script/Code.gs` to a **test** standalone Apps Script deployment and configure `DASHBOARD_SPREADSHEET_ID`, `JOBS_CALENDAR_ID`, and `DASHBOARD_API_TOKEN` with synthetic/test resources. Deploy the Vercel backend pointing at that test endpoint.
+3. Deploy this branch's `apps-script/Code.gs` to a **test** standalone Apps Script deployment and configure `DASHBOARD_SPREADSHEET_ID`, `LEAD_CALENDAR_ID`, `JOBS_CALENDAR_ID`, and `DASHBOARD_API_TOKEN` with synthetic/test resources. Deploy the Vercel backend pointing at that test endpoint.
 4. Confirm booking intake `Sheet1` maps the source event ID into `leadCalendarEventId` (currently physical header `Booking Calendar Event ID`). Ensure it is never treated as a Jobs event ID.
 5. Create a synthetic DEPOSIT_SENT booking. Confirm it and verify exactly one Jobs event appears; verify `Jobs.calendarEventId` matches the actual Jobs calendar event and survives refresh.
 6. Confirm again and repeat an identical API request. Verify one event and the same persisted ID. Test a simulated Sheet save failure after event creation and retry; verify recovery without another event.
@@ -38,5 +38,5 @@
 - Suggested alternatives are only nearby free time slots; business hours, routing, crew assignments and customer acceptance are not assessed.
 - Event recovery searches a 14-day window around the scheduled slot. Missing IDs or moved events outside this window require manual reconciliation.
 - CalendarApp and Sheets are not one transaction. Recovery and rollback reduce duplicate/out-of-sync cases but cannot guarantee atomicity across services.
-- The desired business flow moves the intake event from lead to booking calendar after dashboard confirmation. Current code creates a distinct Jobs event and does not remove/move the lead event; this is a known implementation gap and must be resolved before operational use.
+- Confirmation now creates/reconciles the destination Jobs event, persists its event ID, then removes the matching lead event before persisting `CONFIRMED`. A retry reuses the destination event after a partial failure. This is covered by local synthetic mocks; verify the Google behavior and permissions in the isolated deployment.
 - **Local synthetic mocks only:** Google Calendar and Google Sheets were not reachable from this development session, so live integration has not been verified.

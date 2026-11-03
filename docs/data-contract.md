@@ -12,7 +12,7 @@ This contract records the **test environment** and mappings visible in source, w
 | `jobId` | Human-readable display/reference | Separate from Request ID. Assign once and persist in `Jobs`; it may use service/date text but must not be recomputed on every read. Not a cross-system join key. |
 | Time Ticket `jobKey` | Allocation row key | For a booked job, `booking:` plus the exact Request ID. Manual work uses a `manual:` key and must not be silently merged with a booking. |
 | `leadCalendarEventId` | Intake event pointer | Stored in `Sheet1` column Z. The current physical header is `Booking Calendar Event ID`, but the deployed test booking script creates the intake event on the lead calendar. |
-| `calendarEventId` | Confirmed Jobs event pointer | Stored in `Jobs.calendarEventId`. The dashboard creates a separate event on the Jobs calendar; it does not currently move or remove the lead event. |
+| `calendarEventId` | Confirmed Jobs event pointer | Stored in `Jobs.calendarEventId` before the matching lead event is removed; both IDs stay separate for traceability. |
 
 **Current-code caveat:** the dashboard can generate a display `jobId` from date plus a six-character Request ID prefix, but no longer fabricates a missing Request ID from Job ID. The browser skips rows missing either stable identifier and reports malformed rows. The Time Ticket code can fall back to a booking row number when Request ID is absent. Those legacy fallbacks are **not** the target contract. Reject or quarantine missing/duplicate Request IDs before production integration.
 

@@ -19,6 +19,7 @@ function getConfig_() {
   var properties = PropertiesService.getScriptProperties();
   var config = {
     spreadsheetId: properties.getProperty("DASHBOARD_SPREADSHEET_ID"),
+    leadCalendarId: properties.getProperty("LEAD_CALENDAR_ID"),
     jobsCalendarId: properties.getProperty("JOBS_CALENDAR_ID"),
     apiToken: properties.getProperty("DASHBOARD_API_TOKEN"),
   };
@@ -322,19 +323,59 @@ function confirmBooking_(payload) {
   try {
     var job = getExistingJobRecord_(payload);
     assertStatus_(job, ["DEPOSIT_SENT", "CONFIRMED"], "confirm booking");
+    if (!job.leadCalendarEventId) throw new Error("Calendar transfer requires the intake lead event ID.");
     var calendar = getJobsCalendar_();
+    var leadCalendar = getLeadCalendar_();
+    var leadEvent = leadCalendar.getEventById(job.leadCalendarEventId);
+    if (!leadEvent && !job.calendarEventId) {
+      throw new Error("Lead calendar event is missing before the Jobs event was saved. Reconcile manually.");
+    }
+    if (leadEvent && !leadEventHasRequestId_(leadEvent, job.requestId)) {
+      throw new Error("Lead calendar event does not match this Request ID. Reconcile manually.");
+    }
     var period = calendarPeriod_(job);
     var event = findJobsEvent_(calendar, job);
     if (event) {
-      // Repeated clicks and network retries must reuse the same Jobs event.
+      // A retry reuses the Jobs event before attempting lead-event cleanup again.
       if (event.getStartTime().getTime() !== period.start.getTime() ||
           event.getEndTime().getTime() !== period.end.getTime()) {
-        throw new Error("Calendar event time differs from the booking. Reconcile before confirming.");
+        if (normalizeStatus_(job.status) === "CONFIRMED") {
+          throw new Error("Calendar event time differs from the booking. Reconcile before confirming.");
+        }
+        assertCalendarAvailable_(calendar, period.start, period.end, event.getId());
+        applyCalendarEvent_(event, job, period);
       }
     } else {
       assertCalendarAvailable_(calendar, period.start, period.end, "");
       event = createCalendarEvent_(job, calendar, period);
     }
+
+    // Save the Jobs event ID before removing the lead event. If either the
+    // deletion or the final Sheet write fails, a retry can find this exact job
+    // event and safely finish the transfer without creating a duplicate.
+    if (job.calendarEventId !== event.getId()) {
+      var staged = mergeObjects_(job, { calendarEventId: event.getId() });
+      saveJobRecord_(staged);
+      job = getExistingJobRecord_(payload);
+      if (job.calendarEventId !== event.getId()) {
+        throw new Error("Jobs calendar event exists but its ID did not persist. Reconcile before continuing.");
+      }
+    }
+
+    if (leadEvent) {
+      if (job.leadCalendarEventId === event.getId()) {
+        throw new Error("Lead and Jobs calendar event IDs unexpectedly match. Reconcile manually.");
+      }
+      try {
+        leadEvent.deleteEvent();
+      } catch (error) {
+        throw new Error("Jobs event is saved, but the lead calendar event could not be removed. Retry confirmation to finish the transfer.");
+      }
+      if (leadCalendar.getEventById(job.leadCalendarEventId)) {
+        throw new Error("Jobs event is saved, but the lead calendar event could not be removed. Retry confirmation to finish the transfer.");
+      }
+    }
+
     var updated = mergeObjects_(job, {
       status: CONFIG.statusConfirmed,
       // Confirmation follows the operator's explicit manual payment check;
@@ -343,12 +384,10 @@ function confirmBooking_(payload) {
       confirmedAt: job.confirmedAt || nowIso_(),
       calendarEventId: event.getId(),
     });
-    // If the spreadsheet write fails after event creation, the Request ID marker
-    // allows a later retry to find that event rather than create a duplicate.
     saveJobRecord_(updated);
     var persisted = getExistingJobRecord_(payload);
-    if (persisted.calendarEventId !== event.getId()) {
-      throw new Error("Calendar event exists but event ID did not persist. Reconcile before continuing.");
+    if (persisted.status !== CONFIG.statusConfirmed || persisted.calendarEventId !== event.getId()) {
+      throw new Error("Calendar transfer completed but its confirmed state did not persist. Retry confirmation to finish.");
     }
     return persisted;
   } finally {
@@ -717,6 +756,14 @@ function getJobsCalendar_() {
   return calendar;
 }
 
+function getLeadCalendar_() {
+  var calendarId = getConfig_().leadCalendarId;
+  if (!calendarId) throw new Error("Lead calendar synchronization is not configured.");
+  var calendar = CalendarApp.getCalendarById(calendarId);
+  if (!calendar) throw new Error("Lead calendar was not found or access was denied.");
+  return calendar;
+}
+
 function calendarPeriod_(job) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(job.preferredDate || "")) ||
       !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(job.preferredTime || ""))) {
@@ -823,6 +870,12 @@ function calendarEventDetails_(job) {
 function eventHasRequestIdMarker_(event, requestId) {
   if (!requestId) return false;
   var marker = "DWAP-Request-ID: " + requestId;
+  return String(event.getDescription() || "").split("\n").indexOf(marker) !== -1;
+}
+
+function leadEventHasRequestId_(event, requestId) {
+  if (!requestId) return false;
+  var marker = "Request ID: " + requestId;
   return String(event.getDescription() || "").split("\n").indexOf(marker) !== -1;
 }
 

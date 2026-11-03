@@ -7,6 +7,7 @@ const configuredToken = "synthetic-apps-script-token-for-tests-only";
 const configuredProperties = {
   DASHBOARD_API_TOKEN: configuredToken,
   DASHBOARD_SPREADSHEET_ID: "synthetic-test-sheet-id",
+  LEAD_CALENDAR_ID: "synthetic-test-lead-calendar-id",
   JOBS_CALENDAR_ID: "synthetic-test-calendar-id",
 };
 const source = readFileSync(new URL("../apps-script/Code.gs", import.meta.url), "utf8");
@@ -76,6 +77,7 @@ test("dashboard Apps Script uses configured spreadsheet ID and has no bound-shee
   const script = loadScript();
   assert.equal(script.getDashboardSpreadsheet_().spreadsheetId, "synthetic-test-sheet-id");
   assert.equal(source.includes("getActiveSpreadsheet"), false);
+  assert.equal(script.getConfig_().leadCalendarId, "synthetic-test-lead-calendar-id");
   assert.equal(script.getConfig_().jobsCalendarId, "synthetic-test-calendar-id");
 });
 

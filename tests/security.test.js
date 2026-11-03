@@ -281,6 +281,10 @@ test("gateway exposes actionable calendar rollback errors but masks private upst
   assert.equal(reconciliation.code, 409);
   assert.match(reconciliation.body.error, /manual reconciliation required/);
 
+  const transferRetry = await invoke("Jobs event is saved, but the lead calendar event could not be removed. Retry confirmation to finish the transfer.");
+  assert.equal(transferRetry.code, 409);
+  assert.match(transferRetry.body.error, /Retry confirmation/);
+
   const privateFailure = await invoke("Exception: private customer row and secret token");
   assert.equal(privateFailure.code, 502);
   assert.doesNotMatch(privateFailure.body.error, /customer row|secret token/);

@@ -4,7 +4,7 @@ React/Vite dashboard for reviewing booking requests and recording job updates. T
 
 The shared system design is documented in `docs/architecture.md`, `docs/data-contract.md`, and `docs/job-lifecycle.md`. Sanitized workbook and booking-intake fixtures with isolated setup instructions are in `test-fixtures/`. The fixtures are not deployed to Google or connected to live business data.
 
-The full two-application milestone plan and current project status are in [`docs/PROJECT_ROADMAP.md`](docs/PROJECT_ROADMAP.md). Milestones 4–5 are on the review branch and are not merged into `main`; the branch is not ready to merge until the lead-to-booking calendar transfer and isolated live integration checks are complete. See [`docs/milestones-4-5-final-verification.md`](docs/milestones-4-5-final-verification.md).
+The full two-application milestone plan and current project status are in [`docs/PROJECT_ROADMAP.md`](docs/PROJECT_ROADMAP.md). Milestones 4–5 are on the review branch and are not merged into `main`; the branch is not ready to merge until isolated live integration checks pass. See [`docs/milestones-4-5-final-verification.md`](docs/milestones-4-5-final-verification.md).
 
 ## What currently works
 
@@ -42,6 +42,7 @@ The source is `apps-script/Code.gs`. Create a **standalone Apps Script project**
 | Script Property | Purpose |
 | --- | --- |
 | `DASHBOARD_SPREADSHEET_ID` | ID from the test booking Sheet URL |
+| `LEAD_CALENDAR_ID` | ID of the test service lead calendar; confirmation removes the intake event only after the Jobs event ID is saved |
 | `JOBS_CALENDAR_ID` | ID of the test service booking calendar |
 | `DASHBOARD_API_TOKEN` | Random token of at least 32 characters; must match Vercel's server-only setting |
 

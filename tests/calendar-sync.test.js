@@ -27,6 +27,7 @@ function makeUtilities() {
 
 function harness(options = {}) {
   const events = [];
+  const leadEvents = [];
   let serial = 0;
   let record = {
     jobId: "JOB-100", requestId: "REQ-100", status: options.status || "DEPOSIT_SENT",
@@ -34,13 +35,16 @@ function harness(options = {}) {
     customerName: "Sample Customer", serviceType: "Move", pickupAddress: "100 Test St",
     dropoffAddress: "200 Test Ave", phone: "5550101000", email: "sample@example.com",
     quoteTotal: 500, depositAmount: 100, balanceDue: 400, depositLink: "",
-    operatorNotes: "", calendarEventId: "", leadCalendarEventId: "lead-event-1",
+    operatorNotes: "", calendarEventId: "", leadCalendarEventId: options.missingLeadEventId ? "" : "lead-event-1",
     balanceCollected: false, actualDurationHours: null, depositPaid: false,
   };
   let saveFailureCount = 0;
+  let saveFailureAt = 0;
+  let saveCalls = 0;
   let silentSaveFailureCount = 0;
   let failCalendarLookup = false;
   let failCreateCount = 0;
+  let failLeadDeleteCount = 0;
   let setTimeFailureCount = 0;
   let failRollbackMetadata = false;
   let locksAcquired = 0;
@@ -74,15 +78,41 @@ function harness(options = {}) {
     },
   };
 
+  if (!options.missingLeadEventId) {
+    const leadState = {
+      id: "lead-event-1", title: "[NEW] MOVE — Sample Customer",
+      start: new Date("2026-11-05T15:00:00Z"), end: new Date("2026-11-05T17:00:00Z"),
+      description: "Request ID: REQ-100\nPhone: 5550101000\nEmail: sample@example.com",
+    };
+    leadEvents.push({
+      getId: () => leadState.id,
+      getTitle: () => leadState.title,
+      getStartTime: () => leadState.start,
+      getEndTime: () => leadState.end,
+      getDescription: () => leadState.description,
+      deleteEvent() {
+        if (failLeadDeleteCount > 0) { failLeadDeleteCount -= 1; throw new Error("lead event deletion unavailable"); }
+        const index = leadEvents.findIndex((item) => item.getId() === leadState.id);
+        if (index !== -1) leadEvents.splice(index, 1);
+      },
+    });
+  }
+  const leadCalendar = {
+    getEventById(id) { return leadEvents.find((event) => event.getId() === id) || null; },
+  };
+
   const context = {
     Date, JSON, Object, Array, Math, String, Number, Boolean, RegExp, Error,
-    CalendarApp: { getCalendarById: () => failCalendarLookup ? null : calendar },
+    CalendarApp: { getCalendarById: (id) => failCalendarLookup ? null : id === "lead-calendar" ? leadCalendar : calendar },
     LockService: { getScriptLock: () => ({ waitLock(ms) { assert.equal(ms, 20000); locksAcquired += 1; }, releaseLock() {} }) },
     Utilities: makeUtilities(),
   };
   vm.createContext(context);
   vm.runInContext(source, context);
-  context.getConfig_ = () => ({ jobsCalendarId: options.missingCalendarId ? "" : "test-calendar" });
+  context.getConfig_ = () => ({
+    leadCalendarId: options.missingLeadCalendarId ? "" : "lead-calendar",
+    jobsCalendarId: options.missingCalendarId ? "" : "test-calendar",
+  });
   context.getExistingJobRecord_ = (payload = {}) => {
     const matches = (!payload.requestId || payload.requestId === record.requestId) &&
       (!payload.jobId || payload.jobId === record.jobId);
@@ -90,19 +120,23 @@ function harness(options = {}) {
     return { ...record };
   };
   context.saveJobRecord_ = (value) => {
+    saveCalls += 1;
     if (saveFailureCount > 0) { saveFailureCount -= 1; throw new Error("Simulated Sheet failure"); }
+    if (saveFailureAt === saveCalls) throw new Error("Simulated final Sheet failure");
     if (silentSaveFailureCount > 0) { silentSaveFailureCount -= 1; return; }
     record = { ...value };
   };
 
   return {
-    context, events, calendar,
+    context, events, leadEvents, calendar,
     getRecord: () => ({ ...record }),
     setRecord: (value) => { record = { ...value }; },
     failNextSave: () => { saveFailureCount += 1; },
+    failSaveAtCall: (call) => { saveFailureAt = call; },
     silentlyFailNextSave: () => { silentSaveFailureCount += 1; },
     failCalendarLookup: () => { failCalendarLookup = true; },
     failNextCreate: () => { failCreateCount += 1; },
+    failNextLeadDelete: () => { failLeadDeleteCount += 1; },
     failSetTimeCalls: (count) => { setTimeFailureCount = count; },
     failRollbackMetadata: () => { failRollbackMetadata = true; },
     lockCount: () => locksAcquired,
@@ -118,6 +152,8 @@ test("confirmation creates a Toronto-timed Jobs event, persists its ID, and is i
   assert.equal(h.events.length, 1);
   assert.equal(first.calendarEventId, second.calendarEventId);
   assert.equal(h.getRecord().status, "CONFIRMED");
+  assert.equal(h.leadEvents.length, 0);
+  assert.equal(first.leadCalendarEventId, "lead-event-1");
   assert.match(h.events[0].getDescription(), /DWAP-Request-ID: REQ-100/);
   assert.equal(h.events[0].getStartTime().toISOString(), "2026-11-05T15:00:00.000Z");
   assert.equal(h.events[0].getEndTime().toISOString(), "2026-11-05T17:00:00.000Z");
@@ -128,11 +164,13 @@ test("confirmation recovers an event after a failed or silently lost Sheet write
   for (const silent of [false, true]) {
     const h = harness();
     if (silent) h.silentlyFailNextSave(); else h.failNextSave();
-    assert.throws(() => h.context.confirmBooking_(key), /Sheet failure|event ID did not persist/);
+    assert.throws(() => h.context.confirmBooking_(key), /Sheet failure|did not persist/);
     assert.equal(h.events.length, 1);
+    assert.equal(h.leadEvents.length, 1);
     const retry = h.context.confirmBooking_(key);
     assert.equal(retry.calendarEventId, "event-1");
     assert.equal(h.events.length, 1);
+    assert.equal(h.leadEvents.length, 0);
   }
 });
 
@@ -188,6 +226,54 @@ test("calendar creation failure does not mark the booking confirmed", () => {
   assert.equal(h.getRecord().status, "DEPOSIT_SENT");
   assert.equal(h.getRecord().calendarEventId, "");
   assert.equal(h.events.length, 0);
+  assert.equal(h.leadEvents.length, 1);
+});
+
+test("lead transfer retries deletion and final Sheet failures without duplicating the Jobs event", () => {
+  const deleteRetry = harness();
+  deleteRetry.failNextLeadDelete();
+  assert.throws(() => deleteRetry.context.confirmBooking_(key), /lead calendar event could not be removed/);
+  assert.equal(deleteRetry.getRecord().status, "DEPOSIT_SENT");
+  assert.equal(deleteRetry.getRecord().calendarEventId, "event-1");
+  assert.equal(deleteRetry.events.length, 1);
+  assert.equal(deleteRetry.leadEvents.length, 1);
+  deleteRetry.context.confirmBooking_(key);
+  assert.equal(deleteRetry.getRecord().status, "CONFIRMED");
+  assert.equal(deleteRetry.events.length, 1);
+  assert.equal(deleteRetry.leadEvents.length, 0);
+
+  const finalWriteRetry = harness();
+  finalWriteRetry.failSaveAtCall(2);
+  assert.throws(() => finalWriteRetry.context.confirmBooking_(key), /Simulated final Sheet failure/);
+  assert.equal(finalWriteRetry.getRecord().status, "DEPOSIT_SENT");
+  assert.equal(finalWriteRetry.events.length, 1);
+  assert.equal(finalWriteRetry.leadEvents.length, 0);
+  finalWriteRetry.context.confirmBooking_(key);
+  assert.equal(finalWriteRetry.getRecord().status, "CONFIRMED");
+  assert.equal(finalWriteRetry.events.length, 1);
+  assert.equal(finalWriteRetry.leadEvents.length, 0);
+});
+
+test("confirmation requires configured lead calendar, a stored lead event, and matching Request ID", () => {
+  const missingConfig = harness({ missingLeadCalendarId: true });
+  assert.throws(() => missingConfig.context.confirmBooking_(key), /Lead calendar synchronization is not configured/);
+  assert.equal(missingConfig.events.length, 0);
+
+  const missingEvent = harness({ missingLeadEventId: true });
+  assert.throws(() => missingEvent.context.confirmBooking_(key), /requires the intake lead event ID/);
+  assert.equal(missingEvent.events.length, 0);
+
+  const foreignEvent = harness();
+  foreignEvent.leadEvents[0].getDescription = () => "Request ID: SOMEONE-ELSE";
+  assert.throws(() => foreignEvent.context.confirmBooking_(key), /Lead calendar event does not match this Request ID/);
+  assert.equal(foreignEvent.events.length, 0);
+  assert.equal(foreignEvent.leadEvents.length, 1);
+
+  const missingUnstagedLead = harness();
+  missingUnstagedLead.leadEvents.splice(0, 1);
+  assert.throws(() => missingUnstagedLead.context.confirmBooking_(key), /Lead calendar event is missing/);
+  assert.equal(missingUnstagedLead.events.length, 0);
+  assert.equal(missingUnstagedLead.getRecord().status, "DEPOSIT_SENT");
 });
 
 test("stored intake and Jobs event IDs remain separate in canonical mappings", () => {

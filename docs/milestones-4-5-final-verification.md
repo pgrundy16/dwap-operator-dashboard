@@ -6,7 +6,7 @@
 
 ## Summary
 
-Local implementation and regression tests pass after this verification pass. This does not establish production readiness: the dashboard Apps Script is not deployed to the test Google workbook, and live Sheets/Calendar behavior has not been tested. The previously agreed business flow also requires the lead-calendar intake event to move to the booking calendar after confirmation. Current code creates a distinct Jobs event and leaves the lead event in place. That remains an operationally significant gap. **Recommendation: NOT READY TO MERGE.**
+Local implementation and regression tests pass after this verification pass. The dashboard Apps Script now performs a retry-safe lead-to-booking handoff: it creates or recovers one Jobs event, saves its ID, removes the matching lead event, and only then confirms the booking. This behavior is covered by local mocks, but the Apps Script has not yet been deployed to the test Google workbook. Live Sheets/Calendar behavior therefore remains unverified. **Recommendation: NOT READY TO MERGE until the isolated deployment checks below pass.**
 
 ## Milestone 4 — Operator booking management
 
@@ -41,11 +41,11 @@ Local implementation and regression tests pass after this verification pass. Thi
 | Conflict policy | **PASS — implemented; business capacity unverified** | All overlapping events on the configured Jobs calendar count as busy. This is the conservative default for a dedicated single-capacity calendar. It is not a crew/vehicle capacity model; if simultaneous jobs are valid, model calendars/resources before using this policy operationally. |
 | Alternative time suggestions | **PASS — mocked** | Suggestions are later 30-minute candidates, checked against the calendar and Toronto DST resolution; they are suggestions only and are not automatically booked. Business hours, travel time, routing, and crew availability are not evaluated. |
 | Calendar API/network/permission failures | **PASS — mocked / live blocked** | Missing configuration/calendar, denied lookup, create failure, and persistence failures are covered by mocks. Google API outages, real permissions, and network timeout behavior were not tested against Google. |
-| Lead-to-booking calendar transfer | **FAIL — not implemented** | The prior agreed flow says intake starts on the lead calendar and moves to booking calendar after dashboard confirmation. Current implementation creates a separate Jobs event and does not move/delete the lead event. This can leave two events. Resolve and test before operational use or merge. |
+| Lead-to-booking calendar transfer | **PASS — mocked; live test blocked** | Confirmation creates/reconciles the Jobs event, persists its ID, deletes the matching lead event, verifies its removal, then saves `CONFIRMED`. Tests cover failures deleting the lead event and failures persisting final status without creating duplicate Jobs events. Deploy with `LEAD_CALENDAR_ID` and verify in Google before merge. |
 
 ## Test and build results
 
-- `npm test`: **PASS**, 39 tests, 39 passed, 0 failed.
+- `npm test`: **PASS**, 41 tests, 41 passed, 0 failed.
 - `npm run build`: **PASS**, Vite production build completed.
 - `git diff --check`: **PASS**.
 - Lint/type-check: **NOT CONFIGURED** in `package.json`; no dedicated lint or TypeScript check script exists.
@@ -73,13 +73,13 @@ Local implementation and regression tests pass after this verification pass. Thi
 
 ## Integration tests and blockers
 
-**Live integration: BLOCKED / NOT TESTED.** No Google Sheets, Calendar, Apps Script, Vercel, or Supabase connector was available in this session. No live data, production credentials, or deployments were changed. The local mocked tests do not prove actual authorization, calendar event semantics, Sheets header behavior, or concurrent locking in Google.
+**Live integration: BLOCKED / NOT TESTED.** No Google Sheets, Calendar, or Apps Script connection was available for this verification. No live data, production credentials, or deployments were changed. The local mocked tests do not prove actual authorization, calendar event semantics, Sheets header behavior, or concurrent locking in Google.
 
 ## Required isolated-environment verification
 
-1. Deploy this branch's Apps Script as a standalone project and configure its test spreadsheet ID, Jobs calendar ID, token, and any other server-side values using synthetic test resources.
+1. Deploy this branch's Apps Script as a standalone project and configure its test spreadsheet ID, lead calendar ID, Jobs calendar ID, token, and any other server-side values using synthetic test resources.
 2. Use the test workbook and test calendars only. Confirm physical source headers and timezone are aligned with the documented `leadCalendarEventId` / `calendarEventId` separation.
-3. Decide and implement the lead-to-booking event move/transfer behavior. Verify the failure/retry path so the operator never sees confirmation success while the two calendars disagree.
+3. Verify the implemented lead-to-booking handoff and failure/retry path so the operator never sees confirmation success while the two calendars disagree.
 4. Test confirmation twice and with two near-concurrent requests; confirm one Jobs event, stable Request ID, event ID persistence, and correct lifecycle status.
 5. Test conflict, alternatives, reschedule success, Sheet write failure, calendar rollback failure, deleted events, permission denial, and DST-boundary cases in test resources.
 6. Test the dashboard against the isolated Apps Script deployment through its Vercel preview; verify session expiry, mobile layout, and all save/reload workflows.
@@ -87,4 +87,4 @@ Local implementation and regression tests pass after this verification pass. Thi
 
 ## Recommendation
 
-**NOT READY TO MERGE.** Local automated tests and build pass, but live Google service integration remains untested and the previously specified lead-calendar to booking-calendar transfer is absent. Do not merge or use this branch operationally until the transfer behavior is implemented (or the intended workflow is explicitly revised) and the isolated Google/Vercel acceptance steps above pass. No merge into `main` was performed.
+**NOT READY TO MERGE.** Local automated tests and build pass, including the transfer implementation, but live Google service integration remains untested. Do not merge or use this branch operationally until the isolated Google/Vercel acceptance steps above pass. No merge into `main` was performed.

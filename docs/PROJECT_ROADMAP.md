@@ -17,7 +17,7 @@ The projects live in separate repositories because their responsibilities differ
 
 - **Request ID** is the immutable cross-system join key. Keep it stable across the booking Sheet, Dashboard, Jobs calendar marker, Time Ticket, and allocation workbook.
 - **Job ID** is a human-facing display label. It is not the join key and must not be regenerated from mutable booking dates.
-- The intake calendar pointer (`leadCalendarEventId`) and confirmed Jobs event pointer (`calendarEventId`) are distinct fields. The current Dashboard implementation creates a separate Jobs event but leaves the lead event in place. The agreed lead-to-booking transfer is still outstanding.
+- The intake calendar pointer (`leadCalendarEventId`) and confirmed Jobs event pointer (`calendarEventId`) are distinct fields. Dashboard confirmation creates/reconciles the Jobs event, persists its ID, removes the matching lead event, then persists `CONFIRMED`. This handoff is locally tested; live Google behavior still needs verification.
 - Dashboard dates and calendar operations use `America/Toronto`. Sheet and workbook time zones must be aligned before using payroll or calendar automation against an operational workbook.
 - Time Ticket stores exact minutes in `Time Ticket Log` and currently rounds each job upward to the configured 15-minute payroll interval for allocation. The target allocation workbook uses column S for revenue-stream classification and column AM for the stable job key; confirm the actual test workbook headers before wiring new writes.
 - A manually entered Square payment or employee-selected identity is not independent verification. Store evidence and actor identity separately if later automation needs them.
@@ -31,7 +31,7 @@ The projects live in separate repositories because their responsibilities differ
 | Dashboard M2 — Authenticated gateway | **Implemented; single-operator limitation** | Same-origin API, server-side Apps Script token, signed HTTP-only session, validation, and expiry checks are tested. Shared passphrase, no user roles/attribution, and no durable rate limiter remain limitations. |
 | Dashboard M3 — Reliable loading | **Implemented locally** | Demo/live separation, loading/empty/error states, refresh, malformed-row handling, and Toronto formatting are present. Live booking submission is not retested by the current verification pass. |
 | Dashboard M4 — Operator workflow | **Implemented on M5 branch; local tests pass** | Editable fields, validation, lifecycle checks, confirmation dialogs, contact links, and persistence readback are covered by tests. Live Google/Vercel acceptance remains outstanding. |
-| Dashboard M5 — Calendar synchronization | **In review; not ready to merge** | Mock tests cover Jobs event idempotency, recovery, conflicts, alternatives, rescheduling, rollback, and DST. Live Google behavior is unverified. The agreed lead-calendar event transfer is not implemented. See [final verification](milestones-4-5-final-verification.md). |
+| Dashboard M5 — Calendar synchronization | **Implemented locally; live acceptance pending** | Mock tests cover lead-to-booking handoff, Jobs event idempotency, recovery, conflicts, alternatives, rescheduling, rollback, and DST. Verify live Google permissions, transfer, and retries before merge. See [final verification](milestones-4-5-final-verification.md). |
 | Dashboard M6–M11 | **Planned** | Manual workflow completion, AI quote assistance, human approvals, outbound Square/Quo/email automation, production hardening, and portfolio release remain future work. |
 | Time Ticket M0 — Repository baseline | **Repository established; privacy setting not rechecked here** | Separate repository and ignore rules exist. Identity spoofing is documented as a release blocker. |
 | Time Ticket M1 — Workbook contract | **In progress / needs test-workbook verification** | Code has configurable booking columns and known allocation layout assumptions. Verify all tabs, headers, codes, payroll periods, protections, and formulas in a synthetic native Google Sheet. |
@@ -147,7 +147,7 @@ Milestones are reviewable outcomes, not a promise that every milestone equals on
 - Use synthetic customers, employees, payment links, Sheets, and calendars for development and portfolio evidence.
 - Keep API keys, Apps Script URLs/tokens, populated environment files, workbook exports, customer data, and employee data out of browser bundles and Git history.
 - Keep Time Ticket private and synthetic-only until M5 employee authentication and endpoint protections are verified.
-- Keep Dashboard M4–M5 on its review branch until the calendar transfer gap and isolated Google integration checklist are resolved. Current local tests do not prove live Google service behavior.
+- Keep Dashboard M4–M5 on its review branch until the isolated Google integration checklist passes. Current local tests do not prove live Google service behavior.
 - Repository visibility is a separate release decision; a clean current file tree alone does not certify old Git history or deployed credentials.
 - The initial conflict policy treats all overlapping events on the dedicated Jobs calendar as busy. Revisit it if crews, vehicles, or service categories permit multiple concurrent jobs.
 
