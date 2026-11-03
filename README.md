@@ -4,6 +4,8 @@ React/Vite dashboard for reviewing booking requests and recording job updates. T
 
 The shared system design is documented in `docs/architecture.md`, `docs/data-contract.md`, and `docs/job-lifecycle.md`. Sanitized workbook and booking-intake fixtures with isolated setup instructions are in `test-fixtures/`. The fixtures are not deployed to Google or connected to live business data.
 
+The full two-application milestone plan and current project status are in [`docs/PROJECT_ROADMAP.md`](docs/PROJECT_ROADMAP.md). Milestones 4–5 are on the review branch and are not merged into `main`; the branch is not ready to merge until the lead-to-booking calendar transfer and isolated live integration checks are complete. See [`docs/milestones-4-5-final-verification.md`](docs/milestones-4-5-final-verification.md).
+
 ## What currently works
 
 - List jobs from the booking and operator sheets through Apps Script.
@@ -57,6 +59,6 @@ If an earlier token or passphrase was exposed, replace the Apps Script token pro
 
 ## Verification
 
-Run `npm install`, `npm test`, and `npm run build`. See `docs/milestone-4-verification.md` for the new acceptance checks. This GitHub-only change has not been run against a deployed test Apps Script. Use the full-stack deployment or `vercel dev` to check sign-in, sign-out, an unauthorized `/api/jobs` request, session expiration, job listing, invalid input rejection, and one synthetic test update. Use synthetic booking records for portfolio screenshots.
+Run `npm ci`, `npm test`, and `npm run build`. Milestones 4–5 currently pass local automated tests but have not been verified against a deployed dashboard Apps Script, Google Sheet, or Calendar. Use the final verification report for the isolated synthetic-data acceptance steps. Use synthetic booking records for portfolio screenshots.
 
 Append `?demo=1` to the dashboard URL for a public portfolio view containing only synthetic records. Demo mode bypasses sign-in, does not call the jobs API, and disables write controls. The default route remains live mode and uses only authenticated backend data.
