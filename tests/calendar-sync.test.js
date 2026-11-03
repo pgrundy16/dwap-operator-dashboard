@@ -41,6 +41,8 @@ function harness(options = {}) {
   let saveFailureCount = 0;
   let saveFailureAt = 0;
   let saveCalls = 0;
+  let readCalls = 0;
+  let failReadbackAt = 0;
   let silentSaveFailureCount = 0;
   let failCalendarLookup = false;
   let failCreateCount = 0;
@@ -48,6 +50,7 @@ function harness(options = {}) {
   let setTimeFailureCount = 0;
   let failRollbackMetadata = false;
   let locksAcquired = 0;
+  let intakeSchedule = { date: record.preferredDate, time: record.preferredTime };
   const calendar = {
     getEventById(id) { return events.find((event) => event.getId() === id) || null; },
     getEvents(start, end) { return events.filter((event) => event.getStartTime() < end && event.getEndTime() > start); },
@@ -90,6 +93,11 @@ function harness(options = {}) {
       getStartTime: () => leadState.start,
       getEndTime: () => leadState.end,
       getDescription: () => leadState.description,
+      getLocation: () => "",
+      setTime(start, end) { leadState.start = start; leadState.end = end; },
+      setTitle(value) { leadState.title = value; },
+      setDescription(value) { leadState.description = value; },
+      setLocation() {},
       deleteEvent() {
         if (failLeadDeleteCount > 0) { failLeadDeleteCount -= 1; throw new Error("lead event deletion unavailable"); }
         const index = leadEvents.findIndex((item) => item.getId() === leadState.id);
@@ -114,6 +122,8 @@ function harness(options = {}) {
     jobsCalendarId: options.missingCalendarId ? "" : "test-calendar",
   });
   context.getExistingJobRecord_ = (payload = {}) => {
+    readCalls += 1;
+    if (readCalls === failReadbackAt) throw new Error("Simulated Sheet readback failure");
     const matches = (!payload.requestId || payload.requestId === record.requestId) &&
       (!payload.jobId || payload.jobId === record.jobId);
     if (!matches || (!payload.jobId && !payload.requestId)) throw new Error("Job not found for request.");
@@ -126,13 +136,21 @@ function harness(options = {}) {
     if (silentSaveFailureCount > 0) { silentSaveFailureCount -= 1; return; }
     record = { ...value };
   };
+  context.writeBookingSchedule_ = (job) => {
+    const snapshot = { ...intakeSchedule };
+    intakeSchedule = { date: job.preferredDate, time: job.preferredTime };
+    return snapshot;
+  };
+  context.restoreBookingSchedule_ = (snapshot) => { intakeSchedule = { ...snapshot }; };
 
   return {
     context, events, leadEvents, calendar,
     getRecord: () => ({ ...record }),
+    getIntakeSchedule: () => ({ ...intakeSchedule }),
     setRecord: (value) => { record = { ...value }; },
     failNextSave: () => { saveFailureCount += 1; },
     failSaveAtCall: (call) => { saveFailureAt = call; },
+    failReadbackAtCall: (call) => { failReadbackAt = call; },
     silentlyFailNextSave: () => { silentSaveFailureCount += 1; },
     failCalendarLookup: () => { failCalendarLookup = true; },
     failNextCreate: () => { failCreateCount += 1; },
@@ -281,6 +299,37 @@ test("stored intake and Jobs event IDs remain separate in canonical mappings", (
   assert.equal(h.context.findCanonicalField_("Booking Calendar Event ID"), "leadCalendarEventId");
   assert.equal(h.context.findCanonicalField_("Jobs Calendar Event ID"), "calendarEventId");
   assert.notEqual(h.context.HEADER_ALIASES.leadCalendarEventId, h.context.HEADER_ALIASES.calendarEventId);
+});
+
+test("editing a new booking synchronizes its intake row and lead event before quote recording", () => {
+  const h = harness({ status: "NEW" });
+  const updated = h.context.updateBooking_({ ...key, preferredTime: "12:00", operatorNotes: "Test note" });
+  assert.equal(updated.preferredTime, "12:00");
+  assert.equal(updated.operatorNotes, "Test note");
+  assert.deepEqual(h.getIntakeSchedule(), { date: "2026-11-05", time: "12:00" });
+  assert.equal(h.leadEvents[0].getStartTime().toISOString(), "2026-11-05T17:00:00.000Z");
+  assert.equal(h.leadEvents[0].getEndTime().toISOString(), "2026-11-05T19:00:00.000Z");
+  assert.match(h.leadEvents[0].getDescription(), /Request ID: REQ-100/);
+  assert.equal(h.events.length, 0);
+});
+
+test("failed unconfirmed booking save rolls intake schedule and lead event back", () => {
+  const h = harness({ status: "NEW" });
+  h.failNextSave();
+  assert.throws(() => h.context.updateBooking_({ ...key, preferredTime: "12:00" }), /Simulated Sheet failure/);
+  assert.deepEqual(h.getIntakeSchedule(), { date: "2026-11-05", time: "10:00" });
+  assert.equal(h.leadEvents[0].getStartTime().toISOString(), "2026-11-05T15:00:00.000Z");
+  assert.equal(h.getRecord().preferredTime, "10:00");
+});
+
+test("failed unconfirmed persistence readback restores Jobs row, intake row, and lead event", () => {
+  const h = harness({ status: "NEW" });
+  h.failReadbackAtCall(2);
+  assert.throws(() => h.context.updateBooking_({ ...key, preferredTime: "12:00", operatorNotes: "Test note" }), /Simulated Sheet readback failure/);
+  assert.equal(h.getRecord().preferredTime, "10:00");
+  assert.equal(h.getRecord().operatorNotes, "");
+  assert.deepEqual(h.getIntakeSchedule(), { date: "2026-11-05", time: "10:00" });
+  assert.equal(h.leadEvents[0].getStartTime().toISOString(), "2026-11-05T15:00:00.000Z");
 });
 
 test("rescheduling changes the existing event and keeps its ID", () => {

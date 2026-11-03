@@ -260,7 +260,17 @@ export default function App() {
     if (!window.confirm("Record the quote and deposit as manually sent? This does not send a customer message.")) return;
     setIsSaving(true);
     setActionError("");
+    let scheduleAndNotesSaved = false;
+    let quoteRequestCompleted = false;
     try {
+      await updateBooking({
+        jobId: selectedJob.jobId,
+        requestId: selectedJob.requestId,
+        preferredDate: quoteDraft.preferredDate,
+        preferredTime: quoteDraft.preferredTime,
+        operatorNotes: quoteDraft.operatorNotes,
+      });
+      scheduleAndNotesSaved = true;
       await sendDeposit({
         jobId: selectedJob.jobId,
         requestId: selectedJob.requestId,
@@ -269,12 +279,22 @@ export default function App() {
         balanceDue,
         depositLink: quoteDraft.depositLink,
       });
+      quoteRequestCompleted = true;
       await reloadAndVerifyJob(selectedJob.requestId, {
-        status: "DEPOSIT_SENT", quoteTotal, depositAmount, balanceDue,
+        status: "DEPOSIT_SENT",
+        preferredDate: quoteDraft.preferredDate,
+        preferredTime: quoteDraft.preferredTime,
+        operatorNotes: quoteDraft.operatorNotes,
+        quoteTotal, depositAmount, balanceDue,
         depositLink: quoteDraft.depositLink || "",
       });
     } catch (error) {
-      setActionError(error.message);
+      const message = quoteRequestCompleted
+        ? `The quote/deposit request completed, but the saved state could not be verified. Refresh and reconcile before retrying: ${error.message}`
+        : scheduleAndNotesSaved
+          ? `Schedule and notes saved, but the quote/deposit was not recorded: ${error.message}`
+          : error.message;
+      setActionError(message);
       if (error.status === 401) lockDashboard("Your session expired. Sign in again.");
     } finally {
       setIsSaving(false);

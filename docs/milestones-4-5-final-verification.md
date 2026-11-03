@@ -6,14 +6,14 @@
 
 ## Summary
 
-Local implementation and regression tests pass after this verification pass. The dashboard Apps Script now performs a retry-safe lead-to-booking handoff: it creates or recovers one Jobs event, saves its ID, removes the matching lead event, and only then confirms the booking. This behavior is covered by local mocks, but the Apps Script has not yet been deployed to the test Google workbook. Live Sheets/Calendar behavior therefore remains unverified. **Recommendation: NOT READY TO MERGE until the isolated deployment checks below pass.**
+Local implementation and regression tests pass after this verification pass. A user-run test of the prior Preview reported a 9:00 intake time appearing as noon in the Dashboard, then 3:00 PM after quote recording, while the booking sheet remained at 9:00; the note was also missing. Source review found Pacific-time workbook cells being formatted as Toronto and the quote action omitting the edited schedule/note. The local fix reads Date-valued cells in the workbook timezone and saves schedule/note before recording the quote, updating the intake row and lead event together. The updated Apps Script and UI have not yet been redeployed and retested against Google. The retry-safe lead-to-booking handoff remains locally mock-tested. **Recommendation: NOT READY TO MERGE until the updated Preview and isolated Google checks pass.**
 
 ## Milestone 4 — Operator booking management
 
 | Requirement | Result | Evidence / limitation |
 |---|---|---|
-| Edit proposed date and time | **PASS — local** | UI edits feed the update API; server validates strict date/time formats; script persists and reload-verifies them. Confirmed edits reschedule the existing Jobs event. |
-| Edit quote, deposit, and notes | **PASS — local** | Gateway and Apps Script validate amounts, cents, deposit/quote relationship, and note length/control characters; record is reloaded for comparison. |
+| Edit proposed date and time | **PASS — local; live retest required** | Pre-confirmation edits now update the Jobs record, source booking row, and existing lead event; confirmed edits reschedule the existing Jobs event. Tests cover persistence behavior. User-reported Pacific/Toronto offset still needs retesting with the updated Apps Script. |
+| Edit quote, deposit, and notes | **PASS — local; live retest required** | Quote recording now saves the current schedule and operator note before amounts/status. Gateway and Apps Script validate amounts, cents, deposit/quote relationship, and note length/control characters; record is reloaded for comparison. |
 | Record actual duration | **PASS — local** | Completion requires a positive explicit actual duration; it no longer falls back to estimated duration. |
 | Mark balance collected | **PASS — local** | Boolean is persisted and can only be marked true for `DONE`; UI labels it operator-verified, not Square-verified. |
 | Invalid/missing/excessive input | **PASS — local** | Automated tests cover invalid dates/times, negative or excessive amounts, invalid payment URLs, unsupported input, duration, and inconsistent quote/deposit/balance. Calendar layer rejects invalid dates, durations, and Toronto DST gaps/repeated times. |
@@ -45,7 +45,7 @@ Local implementation and regression tests pass after this verification pass. The
 
 ## Test and build results
 
-- `npm test`: **PASS**, 41 tests, 41 passed, 0 failed.
+- `npm test`: **PASS**, 47 tests, 47 passed, 0 failed.
 - `npm run build`: **PASS**, Vite production build completed.
 - `git diff --check`: **PASS**.
 - Lint/type-check: **NOT CONFIGURED** in `package.json`; no dedicated lint or TypeScript check script exists.
@@ -67,13 +67,14 @@ Local implementation and regression tests pass after this verification pass. The
 - Made confirmed rescheduling update existing event metadata and time with Sheet verification and calendar rollback handling.
 - Fixed calendar alternative duration calculation and ensured suggestions are actually free in the mock calendar.
 - Added Toronto local-time handling that rejects nonexistent and ambiguous DST local times.
+- Fixed Pacific-sheet/Toronto-dashboard time normalization for Date-valued cells, and made quote recording persist the edited date, time, and note before changing status. Pre-confirmation schedule edits now update the source booking row and existing lead event with rollback on failure.
 - Added safe customer contact links and clarified manual payment status labels.
 - Updated architecture and lifecycle notes to correct stale claims about status enforcement and event mapping.
 - Removed a duplicated dashboard header block and removed estimated-duration fallback from completion.
 
 ## Integration tests and blockers
 
-**Live integration: BLOCKED / NOT TESTED.** No Google Sheets, Calendar, or Apps Script connection was available for this verification. No live data, production credentials, or deployments were changed. The local mocked tests do not prove actual authorization, calendar event semantics, Sheets header behavior, or concurrent locking in Google.
+**Live integration: BLOCKED / NOT RETESTED AFTER FIX.** The user's manual test of the earlier Preview revealed a timezone mismatch and missing quote-save fields. The updated code is local only so far; the new Apps Script must be deployed and the same synthetic booking retested before any further lifecycle testing. No live data, production credentials, or deployments were changed by this code review. Local mocks do not prove actual authorization, calendar event semantics, Sheets header behavior, or concurrent locking in Google.
 
 ## Required isolated-environment verification
 

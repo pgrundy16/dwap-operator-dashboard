@@ -267,7 +267,57 @@ function updateBooking_(payload) {
         throw error;
       }
     } else {
-      saveJobRecord_(updated);
+      var leadEvent = null;
+      var leadSnapshot = null;
+      var intakeSnapshot = null;
+      var jobWriteAttempted = false;
+      if (scheduleChanged && job.leadCalendarEventId) {
+        var leadCalendar = getLeadCalendar_();
+        leadEvent = leadCalendar.getEventById(job.leadCalendarEventId);
+        if (!leadEvent) throw new Error("Lead calendar event is missing; booking schedule was not updated.");
+        if (!leadEventHasRequestId_(leadEvent, job.requestId)) {
+          throw new Error("Lead calendar event does not match this Request ID. Reconcile manually.");
+        }
+        leadSnapshot = snapshotCalendarEvent_(leadEvent);
+      }
+
+      try {
+        if (leadEvent) {
+          var start = parseTorontoLocalDateTime_(updated.preferredDate, updated.preferredTime);
+          var durationMs = leadSnapshot.end.getTime() - leadSnapshot.start.getTime();
+          if (durationMs <= 0 || durationMs > 24 * 3600000) {
+            throw new Error("Lead calendar event has an invalid duration; booking schedule was not updated.");
+          }
+          leadEvent.setTime(start, new Date(start.getTime() + durationMs));
+        }
+        if (scheduleChanged) intakeSnapshot = writeBookingSchedule_(updated);
+        jobWriteAttempted = true;
+        saveJobRecord_(updated);
+        var persistedRecord = getExistingJobRecord_(payload);
+        if (!bookingPatchMatches_(persistedRecord, updated, patch)) {
+          throw new Error("Saved booking values could not be verified after reloading the Sheet.");
+        }
+        return persistedRecord;
+      } catch (error) {
+        var rollbackFailed = false;
+        if (jobWriteAttempted) {
+          try {
+            saveJobRecord_(job);
+            var restoredRecord = getExistingJobRecord_(payload);
+            if (!bookingPatchMatches_(restoredRecord, job, patch)) rollbackFailed = true;
+          } catch (jobRollbackError) { rollbackFailed = true; }
+        }
+        if (intakeSnapshot) {
+          try { restoreBookingSchedule_(intakeSnapshot); } catch (sheetRollbackError) { rollbackFailed = true; }
+        }
+        if (leadEvent && leadSnapshot) {
+          try { restoreCalendarEvent_(leadEvent, leadSnapshot); } catch (calendarRollbackError) { rollbackFailed = true; }
+        }
+        if (rollbackFailed) {
+          throw new Error("Booking edit failed and data rollback failed; manually reconcile the booking rows and calendar.");
+        }
+        throw error;
+      }
     }
     var persistedRecord = getExistingJobRecord_(payload);
     if (!bookingPatchMatches_(persistedRecord, updated, patch)) {
@@ -470,6 +520,80 @@ function saveJobRecord_(job) {
   sheet.getRange(targetIndex + 2, 1, 1, serialized.length).setValues([serialized]);
 }
 
+function normalizeSpreadsheetDateCell_(field, value, timeZone) {
+  if (Object.prototype.toString.call(value) !== "[object Date]" || isNaN(value.getTime())) return value;
+  if (field === "preferredDate") return Utilities.formatDate(value, timeZone, "yyyy-MM-dd");
+  if (field === "preferredTime") return Utilities.formatDate(value, timeZone, "HH:mm");
+  return value;
+}
+
+function writeBookingSchedule_(job) {
+  if (!job.requestId) throw new Error("Booking schedule cannot be updated without a Request ID.");
+  var spreadsheet = getDashboardSpreadsheet_();
+  var sheet = spreadsheet.getSheetByName(CONFIG.bookingsSheetName);
+  if (!sheet || sheet.getLastRow() < 2) throw new Error("Booking intake row was not found; schedule was not updated.");
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var headerMap = getHeaderMap_(headers);
+  var requestIdColumn = findHeaderIndex_(headerMap, HEADER_ALIASES.requestId) + 1;
+  var dateColumn = findHeaderIndex_(headerMap, HEADER_ALIASES.preferredDate) + 1;
+  var timeColumn = findHeaderIndex_(headerMap, HEADER_ALIASES.preferredTime) + 1;
+  if (!requestIdColumn || !dateColumn || !timeColumn) {
+    throw new Error("Booking intake Sheet is missing Request ID, date, or time headers.");
+  }
+
+  var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+  var matches = [];
+  rows.forEach(function(row, index) {
+    if (String(row[requestIdColumn - 1] || "").trim() === job.requestId) matches.push(index + 2);
+  });
+  if (matches.length !== 1) {
+    throw new Error(matches.length ? "Duplicate Request ID in booking intake Sheet; schedule was not updated." : "Booking intake row was not found; schedule was not updated.");
+  }
+
+  var rowNumber = matches[0];
+  var dateRange = sheet.getRange(rowNumber, dateColumn);
+  var timeRange = sheet.getRange(rowNumber, timeColumn);
+  var snapshot = {
+    dateRange: dateRange,
+    timeRange: timeRange,
+    dateValue: dateRange.getValue(),
+    timeValue: timeRange.getValue(),
+    dateFormat: dateRange.getNumberFormat(),
+    timeFormat: timeRange.getNumberFormat(),
+    timeZone: spreadsheet.getSpreadsheetTimeZone ? spreadsheet.getSpreadsheetTimeZone() : getTimezone_(),
+  };
+
+  try {
+    dateRange.setNumberFormat("@");
+    timeRange.setNumberFormat("@");
+    dateRange.setValue(job.preferredDate);
+    timeRange.setValue(job.preferredTime);
+    var savedDate = normalizeSpreadsheetDateCell_("preferredDate", dateRange.getValue(), snapshot.timeZone);
+    var savedTime = normalizeSpreadsheetDateCell_("preferredTime", timeRange.getValue(), snapshot.timeZone);
+    if (normalizeDateField_(savedDate) !== job.preferredDate || normalizeTimeField_(savedTime) !== job.preferredTime) {
+      throw new Error("The booking Sheet did not preserve the proposed date and time.");
+    }
+    dateRange.setNumberFormat(snapshot.dateFormat);
+    timeRange.setNumberFormat(snapshot.timeFormat);
+  } catch (error) {
+    try { restoreBookingSchedule_(snapshot); } catch (restoreError) {
+      throw new Error("Booking Sheet schedule save failed and could not be rolled back; manually reconcile the intake row.");
+    }
+    throw error;
+  }
+
+  return snapshot;
+}
+
+function restoreBookingSchedule_(snapshot) {
+  snapshot.dateRange.setNumberFormat("@");
+  snapshot.timeRange.setNumberFormat("@");
+  snapshot.dateRange.setValue(snapshot.dateValue);
+  snapshot.timeRange.setValue(snapshot.timeValue);
+  snapshot.dateRange.setNumberFormat(snapshot.dateFormat);
+  snapshot.timeRange.setNumberFormat(snapshot.timeFormat);
+}
+
 function readSheetRows_(spreadsheet, sheetName) {
   var sheet = spreadsheet.getSheetByName(sheetName);
   if (!sheet || sheet.getLastRow() < 2) {
@@ -479,6 +603,9 @@ function readSheetRows_(spreadsheet, sheetName) {
   var values = sheet.getDataRange().getValues();
   var headers = values[0];
   var headerMap = getHeaderMap_(headers);
+  var sheetTimeZone = spreadsheet.getSpreadsheetTimeZone
+    ? spreadsheet.getSpreadsheetTimeZone()
+    : getTimezone_();
 
   return values.slice(1).map(function(row) {
     var record = {};
@@ -486,7 +613,7 @@ function readSheetRows_(spreadsheet, sheetName) {
     Object.keys(HEADER_ALIASES).forEach(function(field) {
       var index = findHeaderIndex_(headerMap, HEADER_ALIASES[field]);
       if (index !== -1) {
-        record[field] = row[index];
+        record[field] = normalizeSpreadsheetDateCell_(field, row[index], sheetTimeZone);
       }
     });
 

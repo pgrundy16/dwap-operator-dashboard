@@ -285,6 +285,10 @@ test("gateway exposes actionable calendar rollback errors but masks private upst
   assert.equal(transferRetry.code, 409);
   assert.match(transferRetry.body.error, /Retry confirmation/);
 
+  const scheduleError = await invoke("The booking Sheet did not preserve the proposed date and time.");
+  assert.equal(scheduleError.code, 409);
+  assert.match(scheduleError.body.error, /did not preserve/);
+
   const privateFailure = await invoke("Exception: private customer row and secret token");
   assert.equal(privateFailure.code, 502);
   assert.doesNotMatch(privateFailure.body.error, /customer row|secret token/);
