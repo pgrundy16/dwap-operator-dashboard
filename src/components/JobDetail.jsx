@@ -1,5 +1,6 @@
 import { formatCurrency, formatDateTime, formatHours, formatJobTime } from "../lib/formatters";
 import { StatusPill } from "./StatusPill";
+import { emailHref, phoneHref } from "../lib/contactLinks";
 
 function Field({ label, value, className = "" }) {
   return (
@@ -78,16 +79,16 @@ export function JobDetail({
               <h3>Customer</h3>
             </div>
             <div className="detail-meta-grid">
-              <div className="detail-field detail-field--card"><span>Phone</span><strong>{/^\\+?[\\d ()-]{7,24}$/.test(job.phone || "") ? <a href={`tel:${job.phone.replace(/[^+\\d]/g, "")}`}>{job.phone}</a> : job.phone || "Not set"}</strong></div>
-              <div className="detail-field detail-field--card"><span>Email</span><strong>{/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(job.email || "") ? <a href={`mailto:${job.email}`}>{job.email}</a> : job.email || "Not set"}</strong></div>
+              <div className="detail-field detail-field--card"><span>Phone</span><strong>{phoneHref(job.phone) ? <a href={phoneHref(job.phone)}>{job.phone}</a> : job.phone || "Not set"}</strong></div>
+              <div className="detail-field detail-field--card"><span>Email</span><strong>{emailHref(job.email) ? <a href={emailHref(job.email)}>{job.email}</a> : job.email || "Not set"}</strong></div>
               <Field
                 label="Submitted"
                 value={formatDateTime(job.submittedAt)}
                 className="detail-field--card"
               />
               <Field
-                label="Deposit Paid"
-                value={job.depositPaid ? "Paid" : "Pending"}
+                label="Deposit (operator marked)"
+                value={job.depositPaid ? "Marked paid" : "Not marked paid"}
                 className="detail-field--card"
               />
             </div>
@@ -146,10 +147,10 @@ export function JobDetail({
             </div>
             <div className="quote-grid">
               <label>Proposed booking date
-                <input type="date" value={quoteDraft.preferredDate} onChange={(e) => onQuoteChange("preferredDate", e.target.value)} disabled={isSaving || isDemoMode} />
+              <input type="date" required value={quoteDraft.preferredDate} onChange={(e) => onQuoteChange("preferredDate", e.target.value)} disabled={isSaving || isDemoMode} />
               </label>
               <label>Proposed booking time
-                <input type="time" value={quoteDraft.preferredTime} onChange={(e) => onQuoteChange("preferredTime", e.target.value)} disabled={isSaving || isDemoMode} />
+              <input type="time" required value={quoteDraft.preferredTime} onChange={(e) => onQuoteChange("preferredTime", e.target.value)} disabled={isSaving || isDemoMode} />
               </label>
               <label>Actual duration (hours)
                 <input type="number" min="0" max="1000" step="0.25" value={quoteDraft.actualDurationHours} onChange={(e) => onQuoteChange("actualDurationHours", e.target.value)} disabled={isSaving || isDemoMode} />
@@ -165,7 +166,7 @@ export function JobDetail({
                   inputMode="decimal"
                   value={quoteDraft.quoteTotal}
                   onChange={(event) => onQuoteChange("quoteTotal", event.target.value)}
-                  disabled={isDemoMode}
+                  disabled={isSaving || isDemoMode}
                   placeholder="650"
                 />
               </label>
@@ -176,7 +177,7 @@ export function JobDetail({
                   inputMode="decimal"
                   value={quoteDraft.depositAmount}
                   onChange={(event) => onQuoteChange("depositAmount", event.target.value)}
-                  disabled={isDemoMode}
+                  disabled={isSaving || isDemoMode}
                   placeholder="200"
                 />
               </label>
@@ -186,8 +187,9 @@ export function JobDetail({
                   type="number"
                   inputMode="decimal"
                   value={quoteDraft.balanceDue}
-                  onChange={(event) => onQuoteChange("balanceDue", event.target.value)}
-                  disabled={isDemoMode}
+                  readOnly
+                  aria-label="Calculated balance due"
+                  disabled={isSaving || isDemoMode}
                   placeholder="450"
                 />
               </label>
@@ -197,14 +199,14 @@ export function JobDetail({
                   type="url"
                   value={quoteDraft.depositLink}
                   onChange={(event) => onQuoteChange("depositLink", event.target.value)}
-                  disabled={isDemoMode}
+                  disabled={isSaving || isDemoMode}
                   placeholder="https://square.link/..."
                 />
               </label>
             </div>
 
             <div className="quote-actions">
-              <button className="button button--primary" type="button" onClick={onSave} disabled={isSaving || isDemoMode}>Save booking edits</button>
+              <button className="button button--primary" type="button" onClick={onSave} disabled={isSaving || isDemoMode || !["NEW", "DEPOSIT_SENT", "CONFIRMED", "DONE"].includes(job.status)}>Save booking edits</button>
               <button className="button button--secondary" type="button" onClick={onSendDeposit} disabled={isSaving || isDemoMode || job.status !== "NEW"}>
                 Record Quote and Deposit
               </button>

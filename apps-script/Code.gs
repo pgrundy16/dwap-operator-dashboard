@@ -65,7 +65,7 @@ var CANONICAL_HEADERS = [
   "archiveOn",
   "riskFlags",
   "calendarEventId",
-  "bookingCalendarEventId",
+  "leadCalendarEventId",
   "balanceCollected",
 ];
 
@@ -102,7 +102,7 @@ var HEADER_ALIASES = {
   archiveOn: ["archiveOn", "archive_on", "Archive On"],
   riskFlags: ["riskFlags", "risk_flags", "Risk Flags"],
   calendarEventId: ["calendarEventId", "calendar_event_id", "Jobs Calendar Event ID"],
-  bookingCalendarEventId: ["bookingCalendarEventId", "Booking Calendar Event ID", "Calendar Event ID"],
+  leadCalendarEventId: ["leadCalendarEventId", "Lead Calendar Event ID", "Booking Calendar Event ID", "Calendar Event ID"],
   balanceCollected: ["balanceCollected", "Balance Collected"],
 };
 
@@ -182,7 +182,7 @@ function listJobs_() {
   var spreadsheet = getDashboardSpreadsheet_();
   var bookingsRows = readSheetRows_(spreadsheet, CONFIG.bookingsSheetName).map(function(row) {
     // The intake calendar ID is NOT a Jobs calendar event ID.
-    row.bookingCalendarEventId = row.bookingCalendarEventId || row.calendarEventId || "";
+    row.leadCalendarEventId = row.leadCalendarEventId || "";
     row.calendarEventId = "";
     return row;
   });
@@ -231,8 +231,9 @@ function updateBooking_(payload) {
     if (patch.quoteTotal !== undefined || patch.depositAmount !== undefined) {
       var quote = patch.quoteTotal !== undefined ? patch.quoteTotal : job.quoteTotal;
       var deposit = patch.depositAmount !== undefined ? patch.depositAmount : job.depositAmount;
+      if (quote === null && deposit !== null) throw new Error("A quote is required before recording a deposit.");
       if (quote !== null && deposit !== null && deposit > quote) throw new Error("Deposit cannot exceed quote.");
-      patch.balanceDue = quote === null || deposit === null ? null : Math.max(quote - deposit, 0);
+      patch.balanceDue = quote === null ? null : Math.max(quote - (deposit || 0), 0);
     }
     if (patch.balanceCollected === true && normalizeStatus_(job.status) !== "DONE") {
       throw new Error("Balance may only be marked collected when the job is complete.");
@@ -242,43 +243,56 @@ function updateBooking_(payload) {
       updated.preferredTime !== job.preferredTime;
     if (job.status === "DONE" && scheduleChanged) throw new Error("Cannot reschedule a completed job.");
 
-    if (job.status === "CONFIRMED" && scheduleChanged) {
+    if (job.status === "CONFIRMED") {
       var calendar = getJobsCalendar_();
       var event = findJobsEvent_(calendar, job);
-      if (!event) throw new Error("Calendar event could not be found. Booking was not rescheduled.");
-      var period = calendarPeriod_(updated);
-      assertCalendarAvailable_(calendar, period.start, period.end, event.getId());
-      var previousStart = event.getStartTime();
-      var previousEnd = event.getEndTime();
-      event.setTime(period.start, period.end);
+      if (!event) throw new Error("Calendar event could not be found. Booking was not updated.");
+      var period = scheduleChanged ? calendarPeriod_(updated) : { start: event.getStartTime(), end: event.getEndTime() };
+      if (scheduleChanged) assertCalendarAvailable_(calendar, period.start, period.end, event.getId());
+      var snapshot = snapshotCalendarEvent_(event);
       updated.calendarEventId = event.getId();
       try {
+        applyCalendarEvent_(event, updated, period);
         saveJobRecord_(updated);
+        var persisted = getExistingJobRecord_(payload);
+        if (!bookingPatchMatches_(persisted, updated, patch) || persisted.calendarEventId !== event.getId()) {
+          throw new Error("Saved booking values could not be verified.");
+        }
+        return persisted;
       } catch (error) {
-        try { event.setTime(previousStart, previousEnd); } catch (rollbackError) {
-          throw new Error("Calendar updated but saving failed; manual reconciliation required.");
+        try { restoreCalendarEvent_(event, snapshot); } catch (rollbackError) {
+          throw new Error("Calendar or Sheet update failed and calendar rollback failed; manual reconciliation required.");
         }
         throw error;
       }
     } else {
       saveJobRecord_(updated);
     }
-    return getExistingJobRecord_(payload);
+    var persistedRecord = getExistingJobRecord_(payload);
+    if (!bookingPatchMatches_(persistedRecord, updated, patch)) {
+      throw new Error("Saved booking values could not be verified after reloading the Sheet.");
+    }
+    return persistedRecord;
   } finally {
     lock.releaseLock();
   }
 }
 
 function updateJobForDeposit_(payload) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
   var job = getExistingJobRecord_(payload);
   assertStatus_(job, ["NEW"], "record deposit");
   var quoteTotal = parseNumber_(payload.quoteTotal);
   var depositAmount = parseNumber_(payload.depositAmount);
   if (depositAmount > quoteTotal) throw new Error("Deposit cannot exceed quote.");
-  var balanceDue = parseNumber_(payload.balanceDue);
-
-  if (balanceDue === null && quoteTotal !== null && depositAmount !== null) {
-    balanceDue = Math.max(quoteTotal - depositAmount, 0);
+  if (quoteTotal === null || depositAmount === null) throw new Error("Quote and deposit amounts are required.");
+  if (depositAmount > quoteTotal) throw new Error("Deposit cannot exceed quote.");
+  var balanceDue = Math.max(quoteTotal - depositAmount, 0);
+  var requestedBalanceDue = parseNumber_(payload.balanceDue);
+  if (requestedBalanceDue === null || Math.round(requestedBalanceDue * 100) !== Math.round(balanceDue * 100)) {
+    throw new Error("Balance due must equal quote total minus deposit amount.");
   }
 
   var updated = mergeObjects_(job, {
@@ -291,7 +305,15 @@ function updateJobForDeposit_(payload) {
   });
 
   saveJobRecord_(updated);
-  return normalizeJobRecord_(updated);
+  var persisted = getExistingJobRecord_(payload);
+  if (persisted.status !== "DEPOSIT_SENT" || persisted.quoteTotal !== quoteTotal ||
+      persisted.depositAmount !== depositAmount || persisted.balanceDue !== balanceDue) {
+    throw new Error("Saved booking values could not be verified after reloading the Sheet.");
+  }
+  return persisted;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function confirmBooking_(payload) {
@@ -315,7 +337,9 @@ function confirmBooking_(payload) {
     }
     var updated = mergeObjects_(job, {
       status: CONFIG.statusConfirmed,
-      depositPaid: job.depositPaid === true,
+      // Confirmation follows the operator's explicit manual payment check;
+      // this is an attestation, not a Square API verification.
+      depositPaid: true,
       confirmedAt: job.confirmedAt || nowIso_(),
       calendarEventId: event.getId(),
     });
@@ -333,21 +357,15 @@ function confirmBooking_(payload) {
 }
 
 function completeJob_(payload) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
   var job = getExistingJobRecord_(payload);
   assertStatus_(job, ["CONFIRMED"], "complete job");
   var completedAt = payload.completedAt || nowIso_();
   var archiveOn = payload.archiveOn || addDaysIso_(completedAt, CONFIG.doneRetentionDays);
   var actualDurationHours = parseNumber_(payload.actualDurationHours);
   if (actualDurationHours === null || actualDurationHours <= 0) throw new Error("Explicit actual duration required.");
-
-  if (actualDurationHours === null) {
-    actualDurationHours = parseNumber_(job.actualDurationHours);
-  }
-  if (actualDurationHours === null) {
-    actualDurationHours = parseNumber_(job.estimatedTimeHours);
-  }
-
-  if (actualDurationHours === null) throw new Error("Record actual job duration before completion.");
   var updated = mergeObjects_(job, {
     status: CONFIG.statusDone,
     completedAt: completedAt,
@@ -356,7 +374,14 @@ function completeJob_(payload) {
   });
 
   saveJobRecord_(updated);
-  return normalizeJobRecord_(updated);
+  var persisted = getExistingJobRecord_(payload);
+  if (persisted.status !== CONFIG.statusDone || persisted.actualDurationHours !== actualDurationHours) {
+    throw new Error("Saved booking values could not be verified after reloading the Sheet.");
+  }
+  return persisted;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function getExistingJobRecord_(payload) {
@@ -649,6 +674,11 @@ function parseNumber_(value) {
   return isNaN(number) ? null : number;
 }
 
+function isValidMoneyAmount_(value) {
+  return typeof value === "number" && isFinite(value) && value >= 0 && value <= 100000000 &&
+    Math.abs(value * 100 - Math.round(value * 100)) < 0.000001;
+}
+
 function parseDurationHours_(value) {
   if (value === "" || value === null || value === undefined) return null;
   if (typeof value === "number") return isFinite(value) ? value : null;
@@ -692,14 +722,7 @@ function calendarPeriod_(job) {
       !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(job.preferredTime || ""))) {
     throw new Error("Calendar requires a valid proposed date and time.");
   }
-  var start = Utilities.parseDate(
-    job.preferredDate + " " + job.preferredTime, "America/Toronto", "yyyy-MM-dd HH:mm"
-  );
-  if (!start || isNaN(start.getTime()) ||
-      Utilities.formatDate(start, "America/Toronto", "yyyy-MM-dd HH:mm") !==
-        job.preferredDate + " " + job.preferredTime) {
-    throw new Error("Calendar time is invalid in Montreal/Toronto time (possibly a DST gap).");
-  }
+  var start = parseTorontoLocalDateTime_(job.preferredDate, job.preferredTime);
   var hours = parseNumber_(job.estimatedTimeHours);
   if (hours === null || hours <= 0 || hours > 24) {
     throw new Error("Calendar requires a valid estimated duration (0–24 hours).");
@@ -711,6 +734,9 @@ function findJobsEvent_(calendar, job) {
   if (job.calendarEventId) {
     var direct = calendar.getEventById(job.calendarEventId);
     if (!direct) throw new Error("Calendar event ID is stored but the event is missing. Reconcile manually.");
+    if (!eventHasRequestIdMarker_(direct, job.requestId)) {
+      throw new Error("Stored Calendar event does not match this Request ID. Reconcile manually.");
+    }
     return direct;
   }
   // Recover an event created before a failed Sheet write, but only if it has
@@ -721,7 +747,7 @@ function findJobsEvent_(calendar, job) {
   var end = new Date(period.end.getTime() + 14 * 86400000);
   var marker = "DWAP-Request-ID: " + job.requestId;
   var matches = calendar.getEvents(start, end).filter(function(event) {
-    return String(event.getDescription() || "").split("\n").indexOf(marker) !== -1;
+    return eventHasRequestIdMarker_(event, job.requestId);
   });
   if (matches.length > 1) throw new Error("Calendar has duplicate events for this Request ID. Manual reconciliation required.");
   return matches[0] || null;
@@ -732,10 +758,19 @@ function calendarAlternatives_(calendar, start, durationMs, excludedEventId) {
   for (var n = 1; n <= 24 && result.length < 3; n++) {
     var candidate = new Date(start.getTime() + n * 30 * 60000);
     var end = new Date(candidate.getTime() + durationMs);
-    if (!calendar.getEvents(candidate, end).some(function(e) {
+    var candidateText = Utilities.formatDate(candidate, "America/Toronto", "yyyy-MM-dd HH:mm");
+    var localDate = candidateText.slice(0, 10);
+    var localTime = candidateText.slice(11, 16);
+    var uniqueLocalCandidate = false;
+    try {
+      uniqueLocalCandidate = parseTorontoLocalDateTime_(localDate, localTime).getTime() === candidate.getTime();
+    } catch (error) {
+      uniqueLocalCandidate = false;
+    }
+    if (uniqueLocalCandidate && !calendar.getEvents(candidate, end).some(function(e) {
       return e.getId() !== excludedEventId;
     })) {
-      result.push(Utilities.formatDate(candidate, "America/Toronto", "yyyy-MM-dd HH:mm"));
+      result.push(candidateText);
     }
   }
   return result;
@@ -746,7 +781,7 @@ function assertCalendarAvailable_(calendar, start, end, excludedEventId) {
     return event.getId() !== excludedEventId;
   });
   if (busy) {
-    var alternatives = calendarAlternatives_(calendar, start, end, excludedEventId);
+    var alternatives = calendarAlternatives_(calendar, start, end.getTime() - start.getTime(), excludedEventId);
     throw new Error("Calendar conflict: time is unavailable." +
       (alternatives.length ? " Suggested alternatives (Toronto): " + alternatives.join(", ") : " No nearby alternatives found."));
   }
@@ -755,7 +790,14 @@ function assertCalendarAvailable_(calendar, start, end, excludedEventId) {
 function createCalendarEvent_(job, calendar, period) {
   calendar = calendar || getJobsCalendar_();
   period = period || calendarPeriod_(job);
-  var title = [job.serviceType || "Job", "-", job.customerName || job.jobId].join(" ");
+  var details = calendarEventDetails_(job);
+  return calendar.createEvent(details.title, period.start, period.end, {
+    description: details.description,
+    location: details.location,
+  });
+}
+
+function calendarEventDetails_(job) {
   var description = [
     "DWAP-Request-ID: " + job.requestId,
     "Job ID: " + (job.jobId || ""),
@@ -766,14 +808,98 @@ function createCalendarEvent_(job, calendar, period) {
     "Pickup: " + (job.pickupAddress || ""),
     "Dropoff: " + (job.dropoffAddress || ""),
     "Helpers: " + (job.helpersNeeded || ""),
-    "Quote: " + (job.quoteTotal || ""),
-    "Balance Due: " + (job.balanceDue || ""),
+    "Quote: " + (job.quoteTotal === null || job.quoteTotal === undefined ? "" : job.quoteTotal),
+    "Balance Due: " + (job.balanceDue === null || job.balanceDue === undefined ? "" : job.balanceDue),
     "Notes: " + (job.additionalNotes || ""),
+    "Operator Notes: " + (job.operatorNotes || ""),
   ].join("\n");
-  return calendar.createEvent(title, period.start, period.end, {
+  return {
+    title: [job.serviceType || "Job", "-", job.customerName || job.jobId].join(" "),
     description: description,
     location: job.pickupAddress || job.dropoffAddress || "",
+  };
+}
+
+function eventHasRequestIdMarker_(event, requestId) {
+  if (!requestId) return false;
+  var marker = "DWAP-Request-ID: " + requestId;
+  return String(event.getDescription() || "").split("\n").indexOf(marker) !== -1;
+}
+
+function snapshotCalendarEvent_(event) {
+  return {
+    start: event.getStartTime(),
+    end: event.getEndTime(),
+    title: event.getTitle(),
+    description: event.getDescription(),
+    location: event.getLocation(),
+  };
+}
+
+function applyCalendarEvent_(event, job, period) {
+  var details = calendarEventDetails_(job);
+  event.setTime(period.start, period.end);
+  event.setTitle(details.title);
+  event.setDescription(details.description);
+  event.setLocation(details.location);
+}
+
+function restoreCalendarEvent_(event, snapshot) {
+  event.setTime(snapshot.start, snapshot.end);
+  event.setTitle(snapshot.title);
+  event.setDescription(snapshot.description);
+  event.setLocation(snapshot.location);
+}
+
+function bookingPatchMatches_(persisted, expected, patch) {
+  var fields = Object.keys(patch);
+  if (patch.quoteTotal !== undefined || patch.depositAmount !== undefined) fields.push("balanceDue");
+  return fields.every(function(field) {
+    var left = persisted[field] === undefined ? null : persisted[field];
+    var right = expected[field] === undefined ? null : expected[field];
+    return left === right;
   });
+}
+
+function parseTorontoLocalDateTime_(dateString, timeString) {
+  var dateParts = dateString.split("-").map(Number);
+  var timeParts = timeString.split(":").map(Number);
+  var year = dateParts[0];
+  var month = dateParts[1];
+  var day = dateParts[2];
+  var hour = timeParts[0];
+  var minute = timeParts[1];
+  var target = Date.UTC(year, month - 1, day, hour, minute);
+  var normalized = new Date(target);
+  if (normalized.getUTCFullYear() !== year || normalized.getUTCMonth() !== month - 1 ||
+      normalized.getUTCDate() !== day || normalized.getUTCHours() !== hour || normalized.getUTCMinutes() !== minute) {
+    throw new Error("Calendar requires a real calendar date and time.");
+  }
+
+  var possibleOffsets = {};
+  [-12, 12].forEach(function(hoursFromTarget) {
+    var sample = new Date(target + hoursFromTarget * 3600000);
+    var offset = Utilities.formatDate(sample, "America/Toronto", "Z");
+    var match = String(offset).match(/^([+-])(\d{2}):?(\d{2})$/);
+    if (match) {
+      var minutes = Number(match[2]) * 60 + Number(match[3]);
+      possibleOffsets[(match[1] === "-" ? -1 : 1) * minutes] = true;
+    }
+  });
+
+  var expectedLocal = dateString + " " + timeString;
+  var candidates = [];
+  Object.keys(possibleOffsets).forEach(function(offsetText) {
+    var candidate = new Date(target - Number(offsetText) * 60000);
+    if (Utilities.formatDate(candidate, "America/Toronto", "yyyy-MM-dd HH:mm") === expectedLocal &&
+        !candidates.some(function(existing) { return existing.getTime() === candidate.getTime(); })) {
+      candidates.push(candidate);
+    }
+  });
+
+  if (candidates.length === 0) throw new Error("Calendar time does not exist in Toronto time (DST gap or invalid date).");
+  if (candidates.length > 1) throw new Error("Calendar time is ambiguous in Toronto time (DST repeated hour).");
+  return candidates[0];
 }
 
 function buildJobId_(job) {
@@ -1030,14 +1156,24 @@ function validateDashboardPayload_(action, payload) {
       var value = payload[field];
       if (value !== undefined && value !== null && (typeof value !== "number" || !isFinite(value) || value < 0 || value > (field === "actualDurationHours" ? 1000 : 100000000))) throw new Error("Invalid " + field);
     });
+    ["quoteTotal", "depositAmount"].forEach(function(field) {
+      if (payload[field] !== undefined && payload[field] !== null && !isValidMoneyAmount_(payload[field])) {
+        throw new Error("Invalid " + field + ". Use a CAD amount with at most two decimal places.");
+      }
+    });
   }
   if (action === CONFIG.actions.sendDeposit) {
     ["quoteTotal", "depositAmount", "balanceDue"].forEach(function(field) {
       var value = payload[field];
-      if (typeof value !== "number" || !isFinite(value) || value < 0 || value > 100000000) {
+      if (!isValidMoneyAmount_(value)) {
         throw new Error("Invalid quote or deposit amount.");
       }
     });
+    if (payload.depositAmount > payload.quoteTotal) throw new Error("Deposit cannot exceed quote.");
+    var expectedBalanceDue = Math.max(Math.round((payload.quoteTotal - payload.depositAmount) * 100) / 100, 0);
+    if (Math.round(payload.balanceDue * 100) !== Math.round(expectedBalanceDue * 100)) {
+      throw new Error("Balance due must equal quote total minus deposit amount.");
+    }
     if (payload.depositLink !== undefined) {
       if (typeof payload.depositLink !== "string" || payload.depositLink.length > 2048) {
         throw new Error("Invalid payment link.");

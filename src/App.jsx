@@ -15,14 +15,17 @@ import { JobCard } from "./components/JobCard";
 import { JobDetail } from "./components/JobDetail";
 import { formatCurrency } from "./lib/formatters";
 import { demoJobs } from "./lib/demoJobs";
+import { calculateJobMetrics } from "./lib/jobMetrics";
 
 const isDemoMode = new URLSearchParams(window.location.search).get("demo") === "1";
 
 function buildQuoteDraft(job) {
+  const quoteTotal = job?.quoteTotal ?? "";
+  const depositAmount = job?.depositAmount ?? "";
   return {
-    quoteTotal: job?.quoteTotal ?? "",
-    depositAmount: job?.depositAmount ?? "",
-    balanceDue: job?.balanceDue ?? "",
+    quoteTotal,
+    depositAmount,
+    balanceDue: quoteTotal === "" ? "" : Math.max(Number(quoteTotal) - Number(depositAmount || 0), 0),
     depositLink: job?.depositLink ?? "",
     preferredDate: job?.preferredDate ?? "",
     preferredTime: job?.preferredTime ?? "",
@@ -142,24 +145,7 @@ export default function App() {
     setQuoteDraft(buildQuoteDraft(selectedJob));
   }, [selectedJob]);
 
-  const stats = useMemo(() => {
-    const pending = jobs.filter((job) => job.status === "NEW").length;
-    const confirmedToday = jobs.filter(
-      (job) =>
-        job.status === "CONFIRMED" &&
-        job.preferredDate === new Intl.DateTimeFormat("en-CA", { timeZone: "America/Toronto", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()),
-    ).length;
-    const balanceOpen = jobs.reduce(
-      (total, job) => total + (job.status === "CONFIRMED" ? Number(job.balanceDue || 0) : 0),
-      0,
-    );
-    const revenueCompleted = jobs.reduce(
-      (total, job) => total + (job.status === "DONE" ? Number(job.quoteTotal || 0) : 0),
-      0,
-    );
-
-    return { pending, confirmedToday, balanceOpen, revenueCompleted };
-  }, [jobs]);
+  const stats = useMemo(() => calculateJobMetrics(jobs), [jobs]);
 
   async function handleUnlock(input) {
     setLoginError("");
@@ -181,22 +167,29 @@ export default function App() {
     }
   }
 
-  function replaceJob(updatedJob) {
-    setJobs((currentJobs) => {
-      const exists = currentJobs.some((job) => job.jobId === updatedJob.jobId);
-      if (!exists) return [updatedJob, ...currentJobs];
-      return currentJobs.map((job) =>
-        job.jobId === updatedJob.jobId ? updatedJob : job,
-      );
-    });
-    setSelectedJobId(updatedJob.jobId);
+  async function reloadAndVerifyJob(requestId, expectedFields) {
+    const result = await fetchJobs();
+    const persisted = result.jobs.find((job) => job.requestId === requestId);
+    if (!persisted) throw new Error("The update was sent, but the booking could not be found after reloading. Refresh and check its saved state.");
+    for (const [field, expected] of Object.entries(expectedFields)) {
+      if ((persisted[field] ?? null) !== (expected ?? null)) {
+        throw new Error(`The update was sent, but the saved ${field} could not be verified. Refresh and reconcile before retrying.`);
+      }
+    }
+    setJobs(result.jobs);
+    setMalformedCount(result.rejectedCount);
+    setSelectedJobId(persisted.jobId);
+    return persisted;
   }
 
   function handleQuoteChange(key, value) {
-    setQuoteDraft((current) => ({
-      ...current,
-      [key]: value,
-    }));
+    setQuoteDraft((current) => {
+      const next = { ...current, [key]: value };
+      if (key === "quoteTotal" || key === "depositAmount") {
+        next.balanceDue = next.quoteTotal === "" ? "" : Math.max(Number(next.quoteTotal) - Number(next.depositAmount || 0), 0);
+      }
+      return next;
+    });
   }
 
   async function handleSave() {
@@ -206,6 +199,15 @@ export default function App() {
     const actualDurationHours = quoteDraft.actualDurationHours === "" ? null : Number(quoteDraft.actualDurationHours);
     if ([quoteTotal, depositAmount, actualDurationHours].some((value) => value !== null && (!Number.isFinite(value) || value < 0))) {
       setActionError("Amounts and duration must be valid nonnegative numbers."); return;
+    }
+    if (quoteTotal !== null && quoteTotal > 100_000_000 || depositAmount !== null && depositAmount > 100_000_000 || actualDurationHours !== null && actualDurationHours > 1000) {
+      setActionError("Amounts or duration exceed the allowed limit."); return;
+    }
+    if (!quoteDraft.preferredDate || !quoteDraft.preferredTime || !/^\d{4}-\d{2}-\d{2}$/.test(quoteDraft.preferredDate) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(quoteDraft.preferredTime)) {
+      setActionError("Enter a valid proposed date and time."); return;
+    }
+    if (quoteTotal === null && depositAmount !== null) {
+      setActionError("A quote is required before recording a deposit."); return;
     }
     if (quoteTotal !== null && depositAmount !== null && depositAmount > quoteTotal) {
       setActionError("Deposit cannot exceed the quote."); return;
@@ -222,13 +224,16 @@ export default function App() {
     setIsSaving(true); setActionError("");
     try {
       await updateBooking(payload);
-      const refreshed = await fetchJobs();
-      const persisted = refreshed.jobs.find((job) => job.requestId === selectedJob.requestId);
-      if (!persisted) throw new Error("Saved booking could not be reloaded.");
-      for (const key of Object.keys(payload).filter((key) => !["jobId", "requestId"].includes(key))) {
-        if ((persisted[key] ?? null) !== (payload[key] ?? null)) throw new Error("Saved value for " + key + " could not be verified.");
-      }
-      setJobs(refreshed.jobs); setMalformedCount(refreshed.rejectedCount); setSelectedJobId(persisted.jobId);
+      await reloadAndVerifyJob(selectedJob.requestId, {
+        preferredDate: payload.preferredDate,
+        preferredTime: payload.preferredTime,
+        quoteTotal: payload.quoteTotal,
+        depositAmount: payload.depositAmount,
+        balanceDue: quoteTotal === null ? null : Math.max(quoteTotal - (depositAmount || 0), 0),
+        operatorNotes: payload.operatorNotes,
+        actualDurationHours: payload.actualDurationHours,
+        balanceCollected: payload.balanceCollected,
+      });
     } catch (error) {
       setActionError(error.message);
       if (error.status === 401) lockDashboard("Your session expired. Sign in again.");
@@ -236,9 +241,18 @@ export default function App() {
   }
 
   async function handleSendDeposit() {
-    if (isDemoMode) return;
-    const quoteTotal = Number(quoteDraft.quoteTotal || 0);
-    const depositAmount = Number(quoteDraft.depositAmount || 0);
+    if (isDemoMode || !selectedJob) return;
+    if (quoteDraft.quoteTotal === "" || quoteDraft.depositAmount === "") {
+      setActionError("Enter both a quote total and deposit amount before recording the deposit."); return;
+    }
+    const quoteTotal = Number(quoteDraft.quoteTotal);
+    const depositAmount = Number(quoteDraft.depositAmount);
+    if (![quoteTotal, depositAmount].every((value) => Number.isFinite(value) && value >= 0 && value <= 100_000_000)) {
+      setActionError("Quote and deposit must be valid nonnegative amounts."); return;
+    }
+    if (depositAmount > quoteTotal) {
+      setActionError("Deposit cannot exceed the quote."); return;
+    }
     const balanceDue =
       Math.max(quoteTotal - depositAmount, 0);
 
@@ -247,7 +261,7 @@ export default function App() {
     setIsSaving(true);
     setActionError("");
     try {
-      const updatedJob = await sendDeposit({
+      await sendDeposit({
         jobId: selectedJob.jobId,
         requestId: selectedJob.requestId,
         quoteTotal,
@@ -255,10 +269,9 @@ export default function App() {
         balanceDue,
         depositLink: quoteDraft.depositLink,
       });
-
-      replaceJob({
-        ...selectedJob,
-        ...updatedJob,
+      await reloadAndVerifyJob(selectedJob.requestId, {
+        status: "DEPOSIT_SENT", quoteTotal, depositAmount, balanceDue,
+        depositLink: quoteDraft.depositLink || "",
       });
     } catch (error) {
       setActionError(error.message);
@@ -278,10 +291,8 @@ export default function App() {
         jobId: selectedJob.jobId,
         requestId: selectedJob.requestId,
       });
-
-      replaceJob({
-        ...selectedJob,
-        ...updatedJob,
+      await reloadAndVerifyJob(selectedJob.requestId, {
+        status: "CONFIRMED", calendarEventId: updatedJob.calendarEventId,
       });
     } catch (error) {
       setActionError(error.message);
@@ -301,13 +312,10 @@ export default function App() {
       const updatedJob = await completeJob({
         jobId: selectedJob.jobId,
         requestId: selectedJob.requestId,
-        actualDurationHours:
-          selectedJob.actualDurationHours || selectedJob.estimatedTimeHours,
+        actualDurationHours: selectedJob.actualDurationHours,
       });
-
-      replaceJob({
-        ...selectedJob,
-        ...updatedJob,
+      await reloadAndVerifyJob(selectedJob.requestId, {
+        status: "DONE", actualDurationHours: updatedJob.actualDurationHours,
       });
     } catch (error) {
       setActionError(error.message);
@@ -328,22 +336,6 @@ export default function App() {
   return (
     <main className="app-shell">
       <div className="app-backdrop" />
-      <section className="hero-header">
-        <div className="brand-chip brand-chip--solid">Montreal Operator Dashboard</div>
-
-        <div className="hero__callout-dashboard">
-          <span className="hero__callout-label-dashboard">Dashboard status</span>
-          <strong>
-            {isLoading
-              ? "Syncing live jobs..."
-              : isSaving
-                ? "Saving live job updates..."
-                : dataError
-                  ? "Unable to load jobs"
-                  : isDemoMode ? "Demo data" : "Jobs loaded"}
-          </strong>
-        </div>
-      </section>
       <section className="hero">
         <div className="brand-chip brand-chip--solid">Montreal Operator Dashboard</div>
 

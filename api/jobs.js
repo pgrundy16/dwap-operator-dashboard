@@ -17,6 +17,11 @@ function isIdentifier(value) {
     !/[\u0000-\u001f\u007f]/.test(value);
 }
 
+function isMoneyAmount(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= MAX_MONEY_AMOUNT &&
+    Math.abs(value * 100 - Math.round(value * 100)) < 0.000001;
+}
+
 function validAppsScriptUrl(value) {
   try {
     const url = new URL(value);
@@ -78,15 +83,18 @@ function validateActionPayload(body) {
       if (!Object.hasOwn(body, field)) continue;
       const value = body[field];
       if (field === "preferredDate") {
-        if (typeof value !== "string" || !/^\\d{4}-\\d{2}-\\d{2}$/.test(value) || (Number.isNaN(new Date(value + "T12:00:00Z").getTime()) || new Date(value + "T12:00:00Z").toISOString().slice(0, 10) !== value)) return { error: "Invalid proposed date." };
+        if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value) || (Number.isNaN(new Date(value + "T12:00:00Z").getTime()) || new Date(value + "T12:00:00Z").toISOString().slice(0, 10) !== value)) return { error: "Invalid proposed date." };
       } else if (field === "preferredTime") {
-        if (typeof value !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(value)) return { error: "Invalid proposed time." };
+        if (typeof value !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return { error: "Invalid proposed time." };
       } else if (field === "operatorNotes") {
-        if (typeof value !== "string" || value.length > 5000 || /[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f]/.test(value)) return { error: "Invalid operator notes." };
+        if (typeof value !== "string" || value.length > 5000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)) return { error: "Invalid operator notes." };
       } else if (field === "balanceCollected") {
         if (typeof value !== "boolean") return { error: "Balance-collected must be true or false." };
       } else if (value !== null && (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > (field === "actualDurationHours" ? 1000 : MAX_MONEY_AMOUNT))) {
         return { error: "Invalid " + field + "." };
+      }
+      if (["quoteTotal", "depositAmount"].includes(field) && value !== null && !isMoneyAmount(value)) {
+        return { error: "Invalid " + field + ". Use a CAD amount with at most two decimal places." };
       }
       normalized[field] = value;
     }
@@ -94,10 +102,15 @@ function validateActionPayload(body) {
 
   if (action === "sendDeposit") {
     for (const field of ["quoteTotal", "depositAmount", "balanceDue"]) {
-      if (typeof body[field] !== "number" || !Number.isFinite(body[field]) || body[field] < 0 || body[field] > MAX_MONEY_AMOUNT) {
+      if (!isMoneyAmount(body[field])) {
         return { error: `${field} must be between 0 and ${MAX_MONEY_AMOUNT}.` };
       }
       normalized[field] = body[field];
+    }
+    if (body.depositAmount > body.quoteTotal) return { error: "Deposit cannot exceed quote." };
+    const expectedBalance = Math.max(Math.round((body.quoteTotal - body.depositAmount) * 100) / 100, 0);
+    if (Math.round(body.balanceDue * 100) !== Math.round(expectedBalance * 100)) {
+      return { error: "Balance due must equal quote total minus deposit amount." };
     }
 
     if (body.depositLink !== undefined) {
@@ -197,11 +210,16 @@ export default async function handler(req, res) {
       const message = typeof data?.error === "string" ? data.error : "";
       // Only return explicitly classified calendar errors; never echo arbitrary
       // upstream exceptions that might reveal spreadsheet or customer details.
-      const calendarError = /^(Calendar (?:conflict:|requires |time is |event |has |synchronization )|Calendar for Jobs |Scheduled event |No calendar event |Cannot reschedule |Calendar updated but )/.test(message)
+      const calendarError = /^(?:Calendar (?:conflict:|requires |time is |event |has |synchronization )|Calendar for Jobs |Scheduled event |No calendar event |Cannot reschedule |Calendar updated but |Calendar or Sheet update failed)/.test(message)
         && message.length <= 450 ? message : null;
-      return res.status(calendarError ? 409 : 502).json({
+      const lifecycleError = /^Cannot (?:record deposit|confirm booking|complete job|edit booking) from status [A-Z_]+\.$/.test(message) ? message : null;
+      const notFoundError = message === "Job not found for request." ? message : null;
+      const validationError = /^(Deposit cannot exceed quote\.|A quote is required before recording a deposit\.|Quote and deposit amounts are required\.|Balance due must equal quote total minus deposit amount\.|Explicit actual duration required\.|Record actual job duration before completion\.|Cannot reschedule a completed job\.|Balance may only be marked collected when the job is complete\.|Saved booking values could not be verified(?: after reloading the Sheet)?\.)$/.test(message) ? message : null;
+      const safeError = calendarError || lifecycleError || notFoundError || validationError;
+      const status = calendarError || lifecycleError ? 409 : notFoundError ? 404 : validationError ? 400 : 502;
+      return res.status(status).json({
         ok: false,
-        error: calendarError || "The job service rejected the request.",
+        error: safeError || "The job service rejected the request.",
       });
     }
     if (req.method === "GET") {
