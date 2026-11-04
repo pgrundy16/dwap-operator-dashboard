@@ -39,6 +39,8 @@ The browser stores only an `HttpOnly`, `SameSite=Strict` session cookie. The coo
 
 The source is `apps-script/Code.gs`. Create a **standalone Apps Script project** (not a script attached to a spreadsheet), add `Code.gs` and `appsscript.json`, and deploy it as a Web App. It opens the configured booking workbook by ID and reads its calendar ID and API token from **Project Settings → Script Properties**:
 
+The manifest enables the Google Calendar advanced service as `Calendar` (v3). In an existing editor-managed test project, add it under **Services → Add a service → Google Calendar API**; if the project uses a standard Google Cloud project, enable the Calendar API there too. Deploy a new web-app version and authorize the required scopes. Confirmation checks the lead event's Calendar status before and after removal, including cancelled events.
+
 | Script Property | Purpose |
 | --- | --- |
 | `DASHBOARD_SPREADSHEET_ID` | ID from the test booking Sheet URL |
@@ -53,6 +55,8 @@ The gateway accepts only the `listJobs` read path and the `sendDeposit`, `confir
 This is single-operator authentication: the app has one shared passphrase and no individual accounts, roles, or attribution for changes. It also has no durable cross-instance login rate limiter. Treat it as a portfolio/single-operator gateway; before relying on it for a wider public deployment, add an identity provider and durable abuse controls.
 
 The script expects `Sheet1` for booking intake and `Jobs` for operator updates. Confirm the actual sheet headers before using it with live data.
+
+Use the combined [Milestones 4–5 live test checklist](docs/milestones-4-5-live-test-checklist.md) for isolated recovery, lifecycle, rescheduling, conflict, and completion acceptance checks.
 
 ## Rotate the previously exposed credential
 

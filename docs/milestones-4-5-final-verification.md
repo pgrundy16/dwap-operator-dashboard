@@ -8,6 +8,8 @@
 
 Local implementation and regression tests pass after this verification pass. A user-run test of the prior Preview reported a 9:00 intake time appearing as noon in the Dashboard, then 3:00 PM after quote recording, while the booking sheet remained at 9:00; the note was also missing. Source review found Pacific-time workbook cells being formatted as Toronto and the quote action omitting the edited schedule/note. The local fix reads Date-valued cells in the workbook timezone and saves schedule/note before recording the quote, updating the intake row and lead event together. The updated Apps Script and UI have not yet been redeployed and retested against Google. The retry-safe lead-to-booking handoff remains locally mock-tested. **Recommendation: NOT READY TO MERGE until the updated Preview and isolated Google checks pass.**
 
+Subsequent isolated testing reproduced a 409 after a Jobs event was saved and the lead event disappeared: the script reported that it could not verify removal and left the booking `DEPOSIT_SENT`. The exact Google cause was not logged. The new source checks Calendar API event status using the iCalendar UID, accepting cancelled or missing events only when a matching Jobs event ID was already persisted. API failures and ambiguous or recurring matches fail closed. This fix is locally tested and still requires deployment and live verification. See [the combined live checklist](milestones-4-5-live-test-checklist.md).
+
 ## Milestone 4 — Operator booking management
 
 | Requirement | Result | Evidence / limitation |
@@ -45,7 +47,7 @@ Local implementation and regression tests pass after this verification pass. A u
 
 ## Test and build results
 
-- `npm test`: **PASS**, 47 tests, 47 passed, 0 failed.
+- `npm test`: **PASS**, 49 tests, 49 passed, 0 failed.
 - `npm run build`: **PASS**, Vite production build completed.
 - `git diff --check`: **PASS**.
 - Lint/type-check: **NOT CONFIGURED** in `package.json`; no dedicated lint or TypeScript check script exists.

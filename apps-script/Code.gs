@@ -376,8 +376,12 @@ function confirmBooking_(payload) {
     if (!job.leadCalendarEventId) throw new Error("Calendar transfer requires the intake lead event ID.");
     var calendar = getJobsCalendar_();
     var leadCalendar = getLeadCalendar_();
-    var leadEvent = leadCalendar.getEventById(job.leadCalendarEventId);
-    if (!leadEvent && !job.calendarEventId) {
+    var leadStatus = leadEventStatus_(job.leadCalendarEventId);
+    var leadEvent = leadStatus === "active" ? leadCalendar.getEventById(job.leadCalendarEventId) : null;
+    if (leadStatus === "active" && !leadEvent) {
+      throw new Error("Lead calendar event could not be loaded. Retry confirmation or reconcile manually.");
+    }
+    if (leadStatus !== "active" && !job.calendarEventId) {
       throw new Error("Lead calendar event is missing before the Jobs event was saved. Reconcile manually.");
     }
     if (leadEvent && !leadEventHasRequestId_(leadEvent, job.requestId)) {
@@ -421,7 +425,7 @@ function confirmBooking_(payload) {
       } catch (error) {
         throw new Error("Jobs event is saved, but the lead calendar event could not be removed. Retry confirmation to finish the transfer.");
       }
-      if (leadCalendar.getEventById(job.leadCalendarEventId)) {
+      if (leadEventStatus_(job.leadCalendarEventId) === "active") {
         throw new Error("Jobs event is saved, but the lead calendar event could not be removed. Retry confirmation to finish the transfer.");
       }
     }
@@ -443,6 +447,33 @@ function confirmBooking_(payload) {
   } finally {
     lock.releaseLock();
   }
+}
+
+// CalendarApp uses iCalendar IDs. The Calendar API can distinguish a
+// cancelled tombstone from an active event even when a direct lookup finds it.
+function leadEventStatus_(icalId) {
+  var result;
+  try {
+    result = Calendar.Events.list(getConfig_().leadCalendarId, {
+      iCalUID: icalId, showDeleted: true, maxResults: 2,
+    });
+  } catch (error) {
+    throw new Error("Lead calendar status could not be verified. Check the test Calendar service and permissions, then retry.");
+  }
+  if (!result || (result.items !== undefined && !Array.isArray(result.items)) ||
+      (result.items === undefined && result.kind !== "calendar#events") || result.nextPageToken) {
+    throw new Error("Lead calendar status is ambiguous. Reconcile manually before confirming.");
+  }
+  var items = result.items || [];
+  if (items.length > 1) throw new Error("Lead calendar status is ambiguous. Reconcile manually before confirming.");
+  if (!items.length) return "missing";
+  var item = items[0];
+  if (!item || item.recurringEventId || (item.recurrence && item.recurrence.length)) {
+    throw new Error("Lead calendar status is ambiguous. Reconcile manually before confirming.");
+  }
+  if (item.status === "cancelled") return "cancelled";
+  if (item.status === "confirmed" || item.status === "tentative") return "active";
+  throw new Error("Lead calendar status is ambiguous. Reconcile manually before confirming.");
 }
 
 function completeJob_(payload) {

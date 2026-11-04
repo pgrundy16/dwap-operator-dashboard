@@ -47,6 +47,7 @@ function harness(options = {}) {
   let failCalendarLookup = false;
   let failCreateCount = 0;
   let failLeadDeleteCount = 0;
+  let leadCancelled = false;
   let setTimeFailureCount = 0;
   let failRollbackMetadata = false;
   let locksAcquired = 0;
@@ -100,6 +101,7 @@ function harness(options = {}) {
       setLocation() {},
       deleteEvent() {
         if (failLeadDeleteCount > 0) { failLeadDeleteCount -= 1; throw new Error("lead event deletion unavailable"); }
+        if (options.retainCancelledLead) { leadCancelled = true; return; }
         const index = leadEvents.findIndex((item) => item.getId() === leadState.id);
         if (index !== -1) leadEvents.splice(index, 1);
       },
@@ -121,6 +123,7 @@ function harness(options = {}) {
     leadCalendarId: options.missingLeadCalendarId ? "" : "lead-calendar",
     jobsCalendarId: options.missingCalendarId ? "" : "test-calendar",
   });
+  context.leadEventStatus_ = () => !leadEvents.length ? "missing" : leadCancelled ? "cancelled" : "active";
   context.getExistingJobRecord_ = (payload = {}) => {
     readCalls += 1;
     if (readCalls === failReadbackAt) throw new Error("Simulated Sheet readback failure");
@@ -155,6 +158,7 @@ function harness(options = {}) {
     failCalendarLookup: () => { failCalendarLookup = true; },
     failNextCreate: () => { failCreateCount += 1; },
     failNextLeadDelete: () => { failLeadDeleteCount += 1; },
+    markLeadCancelled: () => { leadCancelled = true; },
     failSetTimeCalls: (count) => { setTimeFailureCount = count; },
     failRollbackMetadata: () => { failRollbackMetadata = true; },
     lockCount: () => locksAcquired,
@@ -176,6 +180,48 @@ test("confirmation creates a Toronto-timed Jobs event, persists its ID, and is i
   assert.equal(h.events[0].getStartTime().toISOString(), "2026-11-05T15:00:00.000Z");
   assert.equal(h.events[0].getEndTime().toISOString(), "2026-11-05T17:00:00.000Z");
   assert.equal(h.lockCount(), 2);
+});
+
+test("cancelled lead tombstones do not block confirmation or duplicate Jobs events on retry", () => {
+  const h = harness({ retainCancelledLead: true });
+  const first = h.context.confirmBooking_(key);
+  assert.equal(first.status, "CONFIRMED");
+  assert.equal(h.leadEvents.length, 1); // Direct lookup can still return a cancelled object.
+  h.context.confirmBooking_(key);
+  assert.equal(h.events.length, 1);
+
+  const retry = harness({ retainCancelledLead: true });
+  retry.failSaveAtCall(2);
+  assert.throws(() => retry.context.confirmBooking_(key), /Simulated final Sheet failure/);
+  assert.equal(retry.context.confirmBooking_(key).status, "CONFIRMED");
+  assert.equal(retry.events.length, 1);
+
+  const unstaged = harness({ retainCancelledLead: true });
+  unstaged.markLeadCancelled();
+  assert.throws(() => unstaged.context.confirmBooking_(key), /missing before the Jobs event was saved/);
+  assert.equal(unstaged.events.length, 0);
+});
+
+test("Calendar API status lookup fails closed for errors, ambiguity, and recurring events", () => {
+  let response = { items: [{ status: "cancelled" }] };
+  const context = vm.createContext({ Calendar: { Events: { list: () => response } } });
+  vm.runInContext(source, context);
+  context.getConfig_ = () => ({ leadCalendarId: "test-lead" });
+  assert.equal(context.leadEventStatus_("lead@example.com"), "cancelled");
+  response = { items: [{ status: "confirmed" }] };
+  assert.equal(context.leadEventStatus_("lead@example.com"), "active");
+  response = { items: [] };
+  assert.equal(context.leadEventStatus_("lead@example.com"), "missing");
+  response = { kind: "calendar#events" };
+  assert.equal(context.leadEventStatus_("lead@example.com"), "missing");
+  response = {};
+  assert.throws(() => context.leadEventStatus_("lead@example.com"), /ambiguous/);
+  response = { items: [{ status: "confirmed", recurringEventId: "series" }] };
+  assert.throws(() => context.leadEventStatus_("lead@example.com"), /ambiguous/);
+  response = { items: [{ status: "confirmed" }, { status: "cancelled" }] };
+  assert.throws(() => context.leadEventStatus_("lead@example.com"), /ambiguous/);
+  context.Calendar.Events.list = () => { throw new Error("private API details"); };
+  assert.throws(() => context.leadEventStatus_("lead@example.com"), /could not be verified/);
 });
 
 test("confirmation recovers an event after a failed or silently lost Sheet write", () => {
